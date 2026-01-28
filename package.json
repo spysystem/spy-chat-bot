@@ -1,0 +1,103 @@
+{
+  "name": "spy-chat-bot",
+  "version": "1.0.0",
+  "description": "Desktop support tool for querying codebase and database",
+  "main": "dist/electron/main.js",
+  "scripts": {
+    "dev": "concurrently \"npm run dev:vite\" \"npm run dev:electron\"",
+    "dev:vite": "vite",
+    "dev:electron": "npm run copy:assets && tsc -p tsconfig.electron.json && electron .",
+    "build": "npm run build:electron && npm run build:vite",
+    "build:electron": "npm run copy:assets && tsc -p tsconfig.electron.json",
+    "build:vite": "vite build",
+    "copy:assets": "node -e \"const fs = require('fs'); const path = require('path'); const src = 'assets'; const dest = 'dist/assets'; fs.mkdirSync(dest, {recursive: true}); fs.cpSync(src, dest, {recursive: true}); console.log('Assets copied to dist/');\"",
+    "package": "npm run build && electron-builder",
+    "package:win": "npm run build && electron-builder --win",
+    "package:mac": "npm run build && electron-builder --mac",
+    "package:linux": "npm run build && electron-builder --linux"
+  },
+  "keywords": [],
+  "author": "SPY",
+  "license": "ISC",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.71.2",
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "electron-updater": "^6.7.3",
+    "highlight.js": "^11.11.1",
+    "mysql2": "^3.11.5",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-markdown": "^9.0.1",
+    "rehype-highlight": "^7.0.0",
+    "remark-gfm": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/react": "^19.0.1",
+    "@types/react-dom": "^19.0.2",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.2",
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8",
+    "nodemon": "^3.1.11",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.3"
+  },
+  "build": {
+    "appId": "com.spy.spy-chat-bot",
+    "productName": "Spørge Jørgen",
+    "protocols": {
+      "name": "Spørge Jørgen Protocol",
+      "schemes": [
+        "sporge-jorgen"
+      ]
+    },
+    "files": [
+      "dist/**/*",
+      "node_modules/**/*",
+      "package.json"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "category": "public.app-category.developer-tools"
+    },
+    "linux": {
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "category": "Development"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  }
+}

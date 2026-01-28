@@ -1,0 +1,431 @@
+.settings-view {
+	padding: 48px;
+	max-width: 1000px;
+	margin: 0 auto;
+	background: var(--bg-primary);
+	min-height: 100vh;
+}
+
+.settings-section {
+	background: var(--bg-secondary);
+	padding: 32px;
+	border-radius: 8px;
+	margin-bottom: 32px;
+	border: 1px solid var(--border-color);
+}
+
+.settings-section h2 {
+	color: var(--text-primary);
+	margin-bottom: 24px;
+	font-size: 24px;
+	font-weight: 600;
+}
+
+.section-header {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	margin-bottom: 24px;
+}
+
+.section-header h2 {
+	margin-bottom: 0;
+}
+
+.section-header button {
+	padding: 10px 20px;
+	background: var(--accent-color);
+	color: white;
+	border: none;
+	border-radius: 6px;
+	cursor: pointer;
+	font-size: 14px;
+	font-weight: 600;
+	transition: background 0.2s;
+}
+
+.section-header button:hover {
+	background: var(--accent-hover);
+}
+
+.form-group {
+	margin-bottom: 24px;
+}
+
+.form-group label {
+	display: block;
+	margin-bottom: 8px;
+	color: var(--text-primary);
+	font-size: 14px;
+	font-weight: 600;
+}
+
+.form-group input[type="text"],
+.form-group input[type="password"],
+.form-group input[type="number"] {
+	width: 100%;
+	padding: 10px 12px;
+	border: 1px solid var(--border-color);
+	border-radius: 6px;
+	font-size: 14px;
+	transition: border-color 0.2s;
+	background: var(--bg-primary);
+	color: var(--text-primary);
+}
+
+.form-group input[type="checkbox"] {
+	width: 20px;
+	height: 20px;
+	cursor: pointer;
+	accent-color: var(--accent-color);
+}
+
+.checkbox-wrapper {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	padding: 12px;
+	background: var(--bg-primary);
+	border: 1px solid var(--border-color);
+	border-radius: 6px;
+	transition: border-color 0.2s;
+}
+
+.checkbox-wrapper:hover {
+	border-color: var(--accent-color);
+}
+
+.checkbox-description {
+	font-size: 14px;
+	color: var(--text-primary);
+	user-select: none;
+}
+
+.form-group input:focus {
+	outline: none;
+	border-color: var(--accent-color);
+}
+
+.form-group button {
+	margin-top: 12px;
+	padding: 10px 20px;
+	background: var(--accent-color);
+	color: white;
+	border: none;
+	border-radius: 6px;
+	cursor: pointer;
+	font-size: 14px;
+	font-weight: 600;
+	transition: background 0.2s;
+}
+
+.form-group button:hover {
+	background: var(--accent-hover);
+}
+
+.form-group .status {
+	margin-left: 12px;
+	font-size: 14px;
+	font-weight: 600;
+}
+
+.form-group .status.success {
+	color: #28a745;
+}
+
+.form-group .status.error {
+	color: var(--danger-color);
+}
+
+.help-text {
+	font-size: 14px;
+	color: var(--text-secondary);
+	margin-top: 8px;
+	line-height: 1.6;
+}
+
+.help-text a {
+	color: var(--accent-color);
+	text-decoration: none;
+}
+
+.help-text a:hover {
+	text-decoration: underline;
+}
+
+.empty-state {
+	text-align: center;
+	padding: 48px;
+	color: var(--text-secondary);
+	font-size: 15px;
+	background: var(--bg-tertiary);
+	border-radius: 6px;
+	border: 2px dashed var(--border-color);
+}
+
+.database-list {
+	display: flex;
+	flex-direction: column;
+	gap: 16px;
+	margin-bottom: 32px;
+}
+
+.database-card {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	padding: 20px;
+	background: var(--bg-tertiary);
+	border-radius: 6px;
+	border: 1px solid var(--border-color);
+	transition: border-color 0.2s;
+}
+
+.database-card:hover {
+	border-color: var(--accent-color);
+}
+
+.database-info h3 {
+	font-size: 16px;
+	color: var(--text-primary);
+	margin-bottom: 8px;
+	font-weight: 600;
+}
+
+.database-info p {
+	font-size: 13px;
+	color: var(--text-secondary);
+	margin-bottom: 8px;
+	font-family: 'Consolas', 'Monaco', monospace;
+}
+
+.badge {
+	display: inline-block;
+	padding: 4px 10px;
+	background: #28a745;
+	color: white;
+	border-radius: 12px;
+	font-size: 12px;
+	font-weight: 600;
+}
+
+.database-actions {
+	display: flex;
+	gap: 10px;
+}
+
+.database-actions button {
+	padding: 8px 16px;
+	border: none;
+	border-radius: 6px;
+	cursor: pointer;
+	font-size: 14px;
+	font-weight: 500;
+	transition: background 0.2s;
+}
+
+.database-actions button:first-child {
+	background: var(--accent-color);
+	color: white;
+}
+
+.database-actions button:first-child:hover {
+	background: var(--accent-hover);
+}
+
+.database-actions button.danger {
+	background: var(--danger-color);
+	color: white;
+}
+
+.database-actions button.danger:hover {
+	background: var(--danger-hover);
+}
+
+.database-form {
+	padding: 24px;
+	background: var(--bg-tertiary);
+	border-radius: 6px;
+	border: 1px solid var(--border-color);
+}
+
+.database-form h3 {
+	color: var(--text-primary);
+	margin-bottom: 20px;
+	font-size: 18px;
+	font-weight: 600;
+}
+
+.form-row {
+	display: grid;
+	grid-template-columns: 2fr 1fr;
+	gap: 16px;
+}
+
+.test-result {
+	padding: 12px 16px;
+	border-radius: 6px;
+	margin-bottom: 16px;
+	font-size: 14px;
+	font-weight: 500;
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.test-result.success {
+	background: #dcffe4;
+	color: #22863a;
+	border: 1px solid #28a745;
+}
+
+.test-result.error {
+	background: #ffeef0;
+	color: #86181d;
+	border: 1px solid var(--danger-color);
+}
+
+.form-actions {
+	display: flex;
+	gap: 12px;
+	margin-top: 20px;
+}
+
+.form-actions button {
+	padding: 10px 20px;
+	border: none;
+	border-radius: 6px;
+	cursor: pointer;
+	font-size: 14px;
+	font-weight: 600;
+	transition: background 0.2s;
+}
+
+.form-actions button:first-child {
+	background: var(--bg-hover);
+	color: var(--text-primary);
+}
+
+.form-actions button:first-child:hover {
+	background: var(--border-color);
+}
+
+.form-actions button:nth-child(2) {
+	background: #28a745;
+	color: white;
+}
+
+.form-actions button:nth-child(2):hover:not(:disabled) {
+	background: #22863a;
+}
+
+.form-actions button:nth-child(2):disabled {
+	opacity: 0.5;
+	cursor: not-allowed;
+}
+
+.form-actions button.secondary {
+	background: var(--bg-tertiary);
+	color: var(--text-primary);
+	border: 1px solid var(--border-color);
+}
+
+.form-actions button.secondary:hover {
+	background: var(--bg-hover);
+	border-color: var(--accent-color);
+}
+
+.checkbox-label {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	cursor: pointer;
+	user-select: none;
+}
+
+.checkbox-label input[type="checkbox"] {
+	width: 20px;
+	height: 20px;
+	cursor: pointer;
+}
+
+.checkbox-label span {
+	font-size: 14px;
+	color: var(--text-primary);
+}
+
+/* Updates & About Section */
+.version-info {
+	padding: 12px 16px;
+	background: var(--bg-primary);
+	border: 1px solid var(--border-color);
+	border-radius: 8px;
+	font-family: 'Monaco', 'Menlo', 'Consolas', monospace;
+}
+
+.version-number {
+	color: var(--accent-color);
+	font-weight: 600;
+	font-size: 14px;
+}
+
+.update-available,
+.update-downloading,
+.update-ready,
+.update-current,
+.update-error {
+	margin-top: 12px;
+	padding: 12px 16px;
+	border-radius: 8px;
+	border-left: 4px solid;
+}
+
+.update-available {
+	background: rgba(102, 126, 234, 0.1);
+	border-left-color: var(--accent-color);
+}
+
+.update-downloading {
+	background: rgba(102, 126, 234, 0.1);
+	border-left-color: var(--accent-color);
+}
+
+.update-ready {
+	background: rgba(76, 175, 80, 0.1);
+	border-left-color: #4caf50;
+}
+
+.update-current {
+	background: rgba(76, 175, 80, 0.1);
+	border-left-color: #4caf50;
+}
+
+.update-error {
+	background: rgba(244, 67, 54, 0.1);
+	border-left-color: #f44336;
+}
+
+.update-available p,
+.update-downloading p,
+.update-ready p,
+.update-current p,
+.update-error p {
+	margin: 0 0 8px 0;
+	font-size: 14px;
+	color: var(--text-primary);
+}
+
+.update-available button,
+.update-ready button {
+	margin-top: 8px;
+}
+
+.install-button {
+	background: linear-gradient(135deg, #4caf50 0%, #45a049 100%);
+	color: white;
+	font-weight: 600;
+}
+
+.install-button:hover {
+	background: linear-gradient(135deg, #45a049 0%, #3d8b40 100%);
+}

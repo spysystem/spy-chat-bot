@@ -1,0 +1,80 @@
+{
+  "version": "1.0",
+  "documents": [
+    {
+      "id": "database-tables",
+      "text": "SPY systemet bruger MySQL database med følgende vigtige tabeller: orders (ordre), order_lines (ordrelinjer), customers (kunder), products (produkter), styles (designs), packing (pakning), shipments (forsendelser), invoices (fakturaer). Alle tabeller har audit felter: added_user_id, added_date, updated_user_id, updated_date.",
+      "metadata": {"category": "database", "topic": "tables"}
+    },
+    {
+      "id": "database-null-constraint",
+      "text": "KRITISK: SPY systemet kan IKKE håndtere NULL værdier i databasen. Brug altid default værdier: 0 for integers, '' for strings, false for booleans. Brug 0 til at repræsentere 'ikke sat' for optional foreign keys.",
+      "metadata": {"category": "database", "topic": "constraints"}
+    },
+    {
+      "id": "database-bi-views",
+      "text": "Brug ALDRIG views der starter med 'bi_' (f.eks. bi_orders, bi_customers, bi_sales). Disse er BI/analytics views og skal undgås. Brug altid de faktiske database tabeller direkte.",
+      "metadata": {"category": "database", "topic": "views"}
+    },
+    {
+      "id": "orders-table",
+      "text": "orders tabellen indeholder: order_id (ordre ID), customer_id (kunde ID), order_number (ordrenummer), order_date (ordredato), status (status: new, processing, packed, shipped, delivered, cancelled), shipping_address (leveringsadresse), billing_address (faktureringsadresse), total_amount (samlet beløb).",
+      "metadata": {"category": "database", "topic": "orders"}
+    },
+    {
+      "id": "order-status-values",
+      "text": "Ordre status værdier i SPY: 'new' (ny), 'processing' (behandles), 'packed' (pakket), 'shipped' (afsendt), 'delivered' (leveret), 'cancelled' (annulleret). Status følger denne workflow: new → processing → packed → shipped → delivered.",
+      "metadata": {"category": "business-logic", "topic": "orders"}
+    },
+    {
+      "id": "customers-table",
+      "text": "customers tabellen indeholder: customer_id (kunde ID), company (firmanavn), email (email), phone (telefon), customer_number (kundenummer), customer_type (kundetype: b2b eller b2c), is_active (aktiv status), credit_limit (kreditgrænse).",
+      "metadata": {"category": "database", "topic": "customers"}
+    },
+    {
+      "id": "products-table",
+      "text": "products tabellen indeholder: product_id (produkt ID), sku (varenummer), name (navn), description (beskrivelse), price (pris), stock_quantity (lagerbeholdning), style_id (design ID), color_id (farve ID), size_id (størrelse ID).",
+      "metadata": {"category": "database", "topic": "products"}
+    },
+    {
+      "id": "packing-process",
+      "text": "Pakning i SPY: Ordre skal først være status 'processing' før pakning. Pakning registreres i packing tabellen med packing_location (pakkelokation), packer_id (pakker bruger ID), packing_date (pakkedato). Efter pakning sættes ordre status til 'packed'.",
+      "metadata": {"category": "business-logic", "topic": "packing"}
+    },
+    {
+      "id": "shipping-integrations",
+      "text": "SPY integrerer med følgende fragtfirmaer: DHL, UPS, FedEx, GLS, PostNord, Bring. Hver forsendelse får et tracking_number (sporingsnummer) og carrier (fragtfirma). shipments tabellen indeholder alle forsendelser.",
+      "metadata": {"category": "integrations", "topic": "shipping"}
+    },
+    {
+      "id": "common-queries",
+      "text": "Almindelige forespørgsler: Find ordre med nummer: SELECT * FROM orders WHERE order_number = 'X'. Find kundens ordre: SELECT * FROM orders WHERE customer_id = X. Find ordrer med status: SELECT * FROM orders WHERE status = 'new'. Se ordrelinjer: SELECT * FROM order_lines WHERE order_id = X.",
+      "metadata": {"category": "examples", "topic": "queries"}
+    },
+    {
+      "id": "join-patterns",
+      "text": "JOIN mønstre i SPY: For at få ordre med kunde info: SELECT o.*, c.company FROM orders o INNER JOIN customers c ON o.customer_id = c.customer_id. For ordre med linjer: SELECT o.*, ol.* FROM orders o LEFT JOIN order_lines ol ON o.order_id = ol.order_id.",
+      "metadata": {"category": "examples", "topic": "joins"}
+    },
+    {
+      "id": "date-queries",
+      "text": "Dato forespørgsler: Dagens ordre: WHERE DATE(order_date) = CURDATE(). Ordre fra periode: WHERE order_date BETWEEN 'YYYY-MM-DD' AND 'YYYY-MM-DD'. Ordre fra måned: WHERE YEAR(order_date) = YYYY AND MONTH(order_date) = MM.",
+      "metadata": {"category": "examples", "topic": "dates"}
+    },
+    {
+      "id": "security-readonly",
+      "text": "SIKKERHED: Alle database operationer er READ-ONLY. Der må KUN udføres SELECT, SHOW, DESCRIBE, og EXPLAIN queries. INSERT, UPDATE, DELETE, DROP, CREATE, ALTER er ALDRIG tilladt.",
+      "metadata": {"category": "security", "topic": "permissions"}
+    },
+    {
+      "id": "table-naming",
+      "text": "Navnekonventioner: Tabeller bruger snake_case (f.eks. order_lines, customer_addresses). Kolonner bruger også snake_case. Primary keys hedder normalt [table]_id (f.eks. order_id, customer_id).",
+      "metadata": {"category": "conventions", "topic": "naming"}
+    },
+    {
+      "id": "common-errors",
+      "text": "Almindelige fejl at undgå: Glem ikke at bruge JOIN når du skal have data fra flere tabeller. Brug IKKE bi_ views. Husk at tabeller kan have forskellige navne end forventet - check altid schema først med SHOW TABLES.",
+      "metadata": {"category": "troubleshooting", "topic": "errors"}
+    }
+  ]
+}
