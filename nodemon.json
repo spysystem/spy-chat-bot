@@ -1,13 +1,15 @@
 {
-  "watch": ["electron/**/*.ts"],
-  "ext": "ts",
-  "ignore": [
-    "dist/**",
-    "node_modules/**",
-    "release/**",
-    "src/**",
-    "*.json"
-  ],
-  "exec": "tsc -p tsconfig.electron.json && electron .",
-  "delay": 1000
+	"watch": [
+		"electron/**/*.ts"
+	],
+	"ext": "ts",
+	"ignore": [
+		"dist/**",
+		"node_modules/**",
+		"release/**",
+		"src/**",
+		"*.json"
+	],
+	"exec": "tsc -p tsconfig.electron.json && electron .",
+	"delay": 1000
 }

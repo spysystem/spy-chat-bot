@@ -1,6 +1,6 @@
+import Anthropic from '@anthropic-ai/sdk';
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import Anthropic from '@anthropic-ai/sdk';
 
 export interface VectorDocument {
 	id: string;
@@ -30,7 +30,6 @@ export class VectorStoreService {
 			// Load the pre-built vector store from assets
 			const data = await fs.readFile(this.vectorStorePath, 'utf-8');
 			this.store = JSON.parse(data);
-			console.log(`Loaded vector store with ${this.store?.documents.length || 0} documents from assets`);
 		} catch (error) {
 			console.error('Error loading vector store from assets:', error);
 			throw new Error('Vector store file not found in assets/vector/vector.store');
@@ -86,14 +85,14 @@ Hvis forespørgslen er generel eller ikke specifik, vælg de mest grundlæggende
 
 			// Remove markdown code blocks if present
 			if (jsonText.includes('```')) {
-				const match = jsonText.match(/```(?:json)?\s*(\[[\s\S]*?\])\s*```/);
+				const match = jsonText.match(/```(?:json)?\s*(\[[\s\S]*?])\s*```/);
 				if (match) {
 					jsonText = match[1];
 				}
 			}
 
 			// Find JSON array in the text
-			const arrayMatch = jsonText.match(/\[[\s\S]*?\]/);
+			const arrayMatch = jsonText.match(/\[[\s\S]*?]/);
 			if (!arrayMatch) {
 				console.warn('No JSON array found in Claude response, using fallback');
 				return this.store.documents.slice(0, topK);
@@ -101,28 +100,15 @@ Hvis forespørgslen er generel eller ikke specifik, vælg de mest grundlæggende
 
 			// Parse the JSON array of indices
 			const selectedIndices = JSON.parse(arrayMatch[0]);
-			console.log(`[Vector Store] Claude Haiku selected indices: [${selectedIndices.join(', ')}] for query: "${query.substring(0, 60)}${query.length > 60 ? '...' : ''}"`);
 			// Return the selected documents
-			const selectedDocs = selectedIndices
+			return selectedIndices
 				.filter((index: number) => index >= 0 && index < this.store!.documents.length)
 				.map((index: number) => this.store!.documents[index])
 				.slice(0, topK);
-
-			// Log selected document IDs
-			console.log(`[Vector Store] Returning ${selectedDocs.length} documents:`, selectedDocs.map((d: VectorDocument) => d.id));
-
-			return selectedDocs;
 		} catch (error) {
 			console.error('Error searching vector store:', error);
 			// Fallback: return first topK documents
 			return this.store.documents.slice(0, topK);
 		}
-	}
-
-	/**
-	 * Get all documents
-	 */
-	getAllDocuments(): VectorDocument[] {
-		return this.store?.documents || [];
 	}
 }

@@ -20,7 +20,7 @@ const githubService                  = new GitHubService();
 const settingsService                = new SettingsService();
 
 // Configure auto-updater
-autoUpdater.autoDownload = false; // Don't auto-download, let user decide
+autoUpdater.autoDownload = true;
 autoUpdater.autoInstallOnAppQuit = true;
 
 // Debug logging helper
@@ -96,8 +96,8 @@ function createDebugWindow(): void {
 	const preloadPath = path.join(__dirname, 'preload.js');
 
 	debugWindow = new BrowserWindow({
-		width         : 1200,
-		height        : 800,
+		width         : 1700,
+		height        : 1000,
 		title         : 'Debug Console - Spørge Jørgen',
 		webPreferences: {
 			preload         : preloadPath,

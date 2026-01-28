@@ -36,6 +36,35 @@ export function SettingsView(): JSX.Element {
 		loadAutoTldr();
 		loadGitHubConfig();
 		loadAppVersion();
+
+		// Setup update event listeners
+		const unsubscribeUpdateAvailable = window.electronAPI.onUpdateAvailable((info) => {
+			setUpdateStatus('available');
+			setUpdateInfo({version: info.version});
+		});
+
+		const unsubscribeDownloadProgress = window.electronAPI.onUpdateDownloadProgress((progress) => {
+			setUpdateStatus('downloading');
+			setUpdateInfo((prev) => ({...prev, progress: Math.round(progress.percent)}));
+		});
+
+		const unsubscribeUpdateDownloaded = window.electronAPI.onUpdateDownloaded(() => {
+			setUpdateStatus('ready');
+			setUpdateInfo((prev) => ({...prev, progress: 100}));
+		});
+
+		const unsubscribeUpdateError = window.electronAPI.onUpdateError((error) => {
+			setUpdateInfo((prev) => ({...prev, error}));
+			setUpdateStatus('none');
+		});
+
+		// Cleanup listeners on unmount
+		return () => {
+			unsubscribeUpdateAvailable();
+			unsubscribeDownloadProgress();
+			unsubscribeUpdateDownloaded();
+			unsubscribeUpdateError();
+		};
 	}, []);
 
 	async function loadConnection(): Promise<void> {
@@ -219,15 +248,15 @@ export function SettingsView(): JSX.Element {
 		try {
 			const result = await window.electronAPI.checkForUpdates();
 			if (result.error) {
-				setUpdateInfo({ error: result.error });
+				setUpdateInfo({error: result.error});
 			} else if (result.available) {
 				setUpdateStatus('available');
-				setUpdateInfo({ version: result.version });
+				setUpdateInfo({version: result.version});
 			} else {
-				setUpdateInfo({ version: result.currentVersion });
+				setUpdateInfo({version: result.currentVersion});
 			}
 		} catch (error) {
-			setUpdateInfo({ error: String(error) });
+			setUpdateInfo({error: String(error)});
 		} finally {
 			setIsCheckingUpdate(false);
 		}
@@ -235,15 +264,15 @@ export function SettingsView(): JSX.Element {
 
 	async function downloadUpdate(): Promise<void> {
 		setUpdateStatus('downloading');
-		setUpdateInfo((prev) => ({ ...prev, progress: 0 }));
+		setUpdateInfo((prev) => ({...prev, progress: 0}));
 		try {
 			const result = await window.electronAPI.downloadUpdate();
 			if (!result.success) {
-				setUpdateInfo((prev) => ({ ...prev, error: result.error }));
+				setUpdateInfo((prev) => ({...prev, error: result.error}));
 				setUpdateStatus('none');
 			}
 		} catch (error) {
-			setUpdateInfo((prev) => ({ ...prev, error: String(error) }));
+			setUpdateInfo((prev) => ({...prev, error: String(error)}));
 			setUpdateStatus('none');
 		}
 	}
@@ -251,6 +280,7 @@ export function SettingsView(): JSX.Element {
 	function installUpdate(): void {
 		window.electronAPI.installUpdate();
 	}
+
 	return (
 		<div className="settings-view">
 			<section className="settings-section">
@@ -432,19 +462,19 @@ export function SettingsView(): JSX.Element {
 					{githubStatus === 'error' && (
 						<span className="status error">⚠ Error saving</span>
 					)}
-			{githubValidation.result && (
-				<div className="form-group">
-					{githubValidation.result.valid ? (
-						<div className="status success">
-							✓ Connection successful! Authenticated as: {githubValidation.result.user}
-						</div>
-					) : (
-						<div className="status error">
-							⚠ Connection failed: {githubValidation.result.error}
+					{githubValidation.result && (
+						<div className="form-group">
+							{githubValidation.result.valid ? (
+								<div className="status success">
+									✓ Connection successful! Authenticated as: {githubValidation.result.user}
+								</div>
+							) : (
+								<div className="status error">
+									⚠ Connection failed: {githubValidation.result.error}
+								</div>
+							)}
 						</div>
 					)}
-				</div>
-			)}
 				</div>
 			</section>
 

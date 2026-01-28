@@ -11,9 +11,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
 	getDatabaseConfigs: () =>
 		ipcRenderer.invoke('get-database-configs'),
 
-	deleteDatabaseConfig: (id: string) =>
-		ipcRenderer.invoke('delete-database-config', id),
-
 	sendMessage: (message: string, databases: string[], history?: Array<{ role: string; content: string }>, databaseName?: string) =>
 		ipcRenderer.invoke('send-message', message, databases, history, databaseName),
 

@@ -1,5 +1,5 @@
 {
-	"appId": "com.spysystem.support-claude",
+	"appId": "com.spysystem.spy-chat-bot",
 	"productName": "Spørge Jørgen",
 	"directories": {
 		"output": "release"

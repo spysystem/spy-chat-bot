@@ -9,12 +9,6 @@ export interface DatabaseConfig {
 	readOnly: boolean;
 }
 
-export interface Message {
-	role: 'user' | 'assistant';
-	content: string;
-	timestamp: Date;
-}
-
 export interface QueryResult {
 	columns: string[];
 	rows: Array<Record<string, unknown>>;

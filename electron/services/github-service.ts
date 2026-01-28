@@ -40,16 +40,10 @@ export class GitHubService {
 		// Trim whitespace from token
 		const token = this.config.token.trim();
 
-		// Debug logging
-		console.log('[GitHubService] Token prefix:', token.substring(0, 10) + '...');
-		console.log('[GitHubService] Token length:', token.length);
-
 		// Fine-grained tokens (github_pat_*) use Bearer, classic tokens (ghp_*) use token
 		if (token.startsWith('github_pat_')) {
-			console.log('[GitHubService] Using Bearer authentication (fine-grained token)');
 			return `Bearer ${token}`;
 		}
-		console.log('[GitHubService] Using token authentication (classic token)');
 		return `token ${token}`;
 	}
 
@@ -65,7 +59,6 @@ export class GitHubService {
 		try {
 			// Test token by fetching authenticated user
 			const authHeader = this.getAuthorizationHeader();
-			console.log('[GitHubService] Full auth header:', authHeader.substring(0, 20) + '...');
 
 			const headers = {
 				'Authorization'       : authHeader,
@@ -74,13 +67,9 @@ export class GitHubService {
 				'User-Agent'          : 'Sporge-Jorgen-App',
 			};
 
-			console.log('[GitHubService] Request headers:', JSON.stringify(headers, null, 2).substring(0, 200));
-
 			const response = await fetch('https://api.github.com/user', {
 				headers: headers,
 			});
-
-			console.log('[GitHubService] Response status:', response.status);
 
 			if (!response.ok) {
 				const errorText = await response.text();

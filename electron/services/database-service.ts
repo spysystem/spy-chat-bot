@@ -18,8 +18,8 @@ import type {DatabaseConfig, QueryResult} from '../types';
  * Even if all application-level checks are bypassed, the MySQL server itself will reject write operations.
  */
 export class DatabaseService {
-	private configPath: string;
-	private queryLogPath: string;
+	private readonly configPath: string;
+	private readonly queryLogPath: string;
 	private connections: Map<string, mysql.Connection> = new Map();
 
 	constructor() {
@@ -53,7 +53,6 @@ export class DatabaseService {
 			await fs.appendFile(this.queryLogPath, logEntry.join('\n'));
 		} catch (logError) {
 			// Don't throw if logging fails - we don't want to break the actual query
-			console.error('Failed to log query:', logError);
 		}
 	}
 
