@@ -74,6 +74,51 @@
 			"id": "common-errors",
 			"text": "Almindelige fejl at undgå: Glem ikke at bruge JOIN når du skal have data fra flere tabeller. Brug IKKE bi_ views. Husk at tabeller kan have forskellige navne end forventet - check altid schema først med SHOW TABLES.",
 			"metadata": {"category": "troubleshooting", "topic": "errors"}
+		},
+		{
+			"id": "ui-main-menu",
+			"text": "SPY System hovedmenu indeholder: 'Dashboard' (oversigt), 'Orders' (ordre), 'Styles' (designs/produkter), 'Customers' (kunder), 'Inventory' (lager), 'Shipping' (forsendelse), 'Tools' (værktøjer), 'Reports' (rapporter), 'Settings' (indstillinger). Hovedmenuen findes typisk til venstre eller øverst i systemet.",
+			"metadata": {"category": "ui", "topic": "navigation"}
+		},
+		{
+			"id": "ui-create-style",
+			"text": "Sådan opretter du en style: 1. Klik på 'Styles' i hovedmenuen. 2. Klik på 'Create New Style' eller '+' knappen (typisk øverst til højre). 3. Udfyld felterne: Style Number (stylenummer), Style Name (stylenavn), Brand (mærke), Season (sæson), Description (beskrivelse). 4. Klik 'Save' for at gemme. Eventuelt kan du derefter tilføje varianter (farver/størrelser) under 'Variants' fanen.",
+			"metadata": {"category": "ui", "topic": "styles"}
+		},
+		{
+			"id": "ui-create-order",
+			"text": "Sådan opretter du en ordre: 1. Klik på 'Orders' i hovedmenuen. 2. Klik på 'Create Order' knappen. 3. Vælg eller søg efter kunde i 'Customer' feltet. 4. Tilføj produkter ved at klikke 'Add Line' og vælge style/produkt. 5. Angiv antal (quantity) for hver linje. 6. Verificer leveringsadresse (shipping address). 7. Klik 'Save Order' eller 'Create Order' for at oprette ordren.",
+			"metadata": {"category": "ui", "topic": "orders"}
+		},
+		{
+			"id": "ui-search-functionality",
+			"text": "Søgefunktion i SPY: De fleste sider har en søgeboks øverst. Du kan søge efter ordre med ordrenummer, kunder med firmanavn/kundenummer, styles med stylenummer/navn. Brug Enter eller klik på søgeikonet for at søge. Mange felter understøtter også autocomplete hvor du kan begynde at skrive og få forslag.",
+			"metadata": {"category": "ui", "topic": "search"}
+		},
+		{
+			"id": "ui-tools-menu",
+			"text": "Tools menuen indeholder forskellige værktøjer: 'Recalculate' (genberegn styles/ordrer), 'Import Data' (importer data), 'Export Data' (eksporter data), 'Bulk Update' (masseopdatering), 'Data Cleanup' (datarensning). Hver tool har typisk sin egen side med specifikke instruktioner.",
+			"metadata": {"category": "ui", "topic": "tools"}
+		},
+		{
+			"id": "ui-recalculate-tool",
+			"text": "Recalculate værktøjet bruges til at genberegne styles når data er ændret. Find det under: Tools → Recalculate. Du kan vælge at genberegne en enkelt style (angiv stylenummer) eller flere styles (vælg filter som brand/season). Klik 'Start Recalculation' for at køre værktøjet. Det kan køre i baggrunden for store mængder data.",
+			"metadata": {"category": "ui", "topic": "tools-recalculate"}
+		},
+		{
+			"id": "ui-order-status-change",
+			"text": "Sådan ændrer du ordrestatus: 1. Find ordren via 'Orders' menuen eller søg efter ordrenummeret. 2. Åbn ordren ved at klikke på den. 3. Find 'Status' feltet eller 'Change Status' knap (ofte øverst eller i højre sidebar). 4. Vælg ny status fra dropdown (new, processing, packed, shipped, delivered, cancelled). 5. Klik 'Save' eller 'Update Status'. Nogle statusændringer kræver ekstra information (f.eks. tracking number for shipped).",
+			"metadata": {"category": "ui", "topic": "orders-status"}
+		},
+		{
+			"id": "ui-common-buttons",
+			"text": "Almindelige knapper i SPY: 'Save' (gem), 'Cancel' (annuller), 'Delete' (slet), 'Edit' (rediger), 'Export' (eksporter), 'Import' (importer), 'Search' (søg), 'Filter' (filtrer), 'Reset' (nulstil), 'Submit' (indsend), 'Back' (tilbage). 'Save' knapper er typisk blå/grønne, 'Delete' knapper er røde, 'Cancel' knapper er grå.",
+			"metadata": {"category": "ui", "topic": "buttons"}
+		},
+		{
+			"id": "ui-reports-access",
+			"text": "Sådan tilgår du rapporter: 1. Klik på 'Reports' i hovedmenuen. 2. Vælg rapporttype (Sales Reports, Inventory Reports, Customer Reports, Order Reports). 3. Vælg datointervald (Date Range) og eventuelle filtre (brand, customer, status). 4. Klik 'Generate Report' eller 'View Report'. 5. Rapporter kan eksporteres via 'Export' knappen (ofte Excel eller PDF format).",
+			"metadata": {"category": "ui", "topic": "reports"}
 		}
 	]
 }

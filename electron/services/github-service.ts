@@ -1,6 +1,7 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import {app} from 'electron';
+import {SecureStorageService} from './secure-storage-service';
 
 export interface GitHubConfig {
 	token: string;
@@ -11,24 +12,43 @@ export interface GitHubConfig {
 
 export class GitHubService {
 	private readonly configPath: string;
+	private readonly secureStorage: SecureStorageService;
 	private config: GitHubConfig | null = null;
 
-	constructor() {
-		this.configPath = path.join(app.getPath('userData'), 'github-config.json');
+	constructor(secureStorage: SecureStorageService) {
+		this.configPath    = path.join(app.getPath('userData'), 'github-config.json');
+		this.secureStorage = secureStorage;
 	}
 
 	async getConfig(): Promise<GitHubConfig | null> {
 		try {
-			const data  = await fs.readFile(this.configPath, 'utf-8');
-			this.config = JSON.parse(data);
-			return this.config;
+			// Load full config from encrypted storage
+			const encryptedData = await this.secureStorage.loadEncrypted('github-config');
+
+			if (encryptedData) {
+				this.config = JSON.parse(encryptedData);
+				return this.config;
+			}
+
+			return null;
 		} catch (error) {
 			return null;
 		}
 	}
 
 	async saveConfig(config: GitHubConfig): Promise<void> {
-		await fs.writeFile(this.configPath, JSON.stringify(config, null, 2), 'utf-8');
+		// Save entire config to encrypted storage
+		await this.secureStorage.saveEncrypted('github-config', JSON.stringify(config));
+
+		// Keep empty placeholder file for compatibility
+		const safeConfig = {
+			token : '',
+			owner : '',
+			repo  : '',
+			branch: '',
+		};
+
+		await fs.writeFile(this.configPath, JSON.stringify(safeConfig, null, 2), 'utf-8');
 		this.config = config;
 	}
 
@@ -120,7 +140,7 @@ export class GitHubService {
 
 		if (!response.ok) {
 			const errorText = await response.text();
- 
+
 			// Special handling for 401 Bad credentials
 			if (response.status === 401) {
 				throw new Error(response.body + `    GitHub API authentication failed (401). Please check:\n1. Token is valid and not expired\n2. Token starts with 'ghp_' or 'github_pat_'\n3. Token has 'repo' scope enabled\n\nGenerate a new token at: https://github.com/settings/tokens`);
@@ -173,7 +193,7 @@ export class GitHubService {
 			const data        = await this.githubRequest(
 				`/repos/${this.config.owner}/${this.config.repo}/contents/${encodedPath}?ref=${this.config.branch}`,
 			);
-			
+
 			if (Array.isArray(data) || data.type !== 'file') {
 				throw new Error('Path is not a file');
 			}

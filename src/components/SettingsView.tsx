@@ -447,12 +447,14 @@ export function SettingsView(): JSX.Element {
 				</p>
 
 				<div className="form-group">
-					<button onClick={saveGitHubConfigFunction}>
-						Save GitHub Configuration
-					</button>
-					<button onClick={testGitHubConnection} disabled={githubValidation.testing}>
-						{githubValidation.testing ? '⏳ Testing...' : '🔍 Test Connection'}
-					</button>
+					<div className="form-btn-flex">
+						<button onClick={saveGitHubConfigFunction}>
+							Save GitHub Configuration
+						</button>
+						<button onClick={testGitHubConnection} disabled={githubValidation.testing}>
+							{githubValidation.testing ? 'Testing...' : 'Test Connection'}
+						</button>
+					</div>
 					{githubStatus === 'saved' && (
 						<span className="status success">✓ Saved</span>
 					)}

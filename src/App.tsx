@@ -3,6 +3,7 @@ import {ChatView} from './components/ChatView';
 import {SettingsView} from './components/SettingsView';
 import {DebugView} from './components/DebugView';
 import {ConfirmModal} from './components/ConfirmModal';
+import {UpdateModal} from './components/UpdateModal';
 import {useTheme} from './ThemeContext';
 import type {Chat} from './types';
 import './App.css';
@@ -17,6 +18,15 @@ export function App(): JSX.Element {
 	const [chats, setChats]                 = useState<Chat[]>([]);
 	const [currentChatId, setCurrentChatId] = useState<string | null>(null);
 	const [chatToDelete, setChatToDelete]   = useState<string | null>(null);
+
+	// Update modal state
+	const [showUpdateModal, setShowUpdateModal]     = useState(false);
+	const [updateVersion, setUpdateVersion]         = useState('');
+	const [updateDownloading, setUpdateDownloading] = useState(false);
+	const [updateProgress, setUpdateProgress]       = useState(0);
+	const [updateReady, setUpdateReady]             = useState(false);
+	const [updateError, setUpdateError]             = useState<string | undefined>();
+	const [forceUpdate]                             = useState(true);
 
 	// Check if electronAPI is available
 	if (!window.electronAPI) {
@@ -35,13 +45,37 @@ export function App(): JSX.Element {
 		loadChats();
 
 		// Setup deep link listener
-		const unsubscribe = window.electronAPI.onDeepLink((url) => {
-			console.log('Deep link received:', url);
+		const unsubscribeDeepLink = window.electronAPI.onDeepLink((url) => {
 			handleDeepLink(url);
 		});
 
+		// Setup update event listeners
+		const unsubscribeUpdateAvailable = window.electronAPI.onUpdateAvailable((info) => {
+			setUpdateVersion(info.version);
+			setShowUpdateModal(true);
+		});
+
+		const unsubscribeDownloadProgress = window.electronAPI.onUpdateDownloadProgress((progress) => {
+			setUpdateDownloading(true);
+			setUpdateProgress(Math.round(progress.percent));
+		});
+
+		const unsubscribeUpdateDownloaded = window.electronAPI.onUpdateDownloaded(() => {
+			setUpdateDownloading(false);
+			setUpdateReady(true);
+		});
+
+		const unsubscribeUpdateError = window.electronAPI.onUpdateError((error) => {
+			setUpdateError(error);
+			setUpdateDownloading(false);
+		});
+
 		return () => {
-			unsubscribe();
+			unsubscribeDeepLink();
+			unsubscribeUpdateAvailable();
+			unsubscribeDownloadProgress();
+			unsubscribeUpdateDownloaded();
+			unsubscribeUpdateError();
 		};
 	}, []);
 
@@ -147,6 +181,33 @@ export function App(): JSX.Element {
 		setCurrentView('chat');
 	}
 
+	// Update handlers
+	async function handleDownloadUpdate(): Promise<void> {
+		setUpdateDownloading(true);
+		setUpdateProgress(0);
+		setUpdateError(undefined);
+		try {
+			const result = await window.electronAPI.downloadUpdate();
+			if (!result.success) {
+				setUpdateError(result.error);
+				setUpdateDownloading(false);
+			}
+		} catch (error) {
+			setUpdateError(String(error));
+			setUpdateDownloading(false);
+		}
+	}
+
+	function handleInstallUpdate(): void {
+		window.electronAPI.installUpdate();
+	}
+
+	function handleDismissUpdate(): void {
+		if (!forceUpdate) {
+			setShowUpdateModal(false);
+		}
+	}
+
 	return (
 		<div className="app">
 			<div className="sidebar">
@@ -238,6 +299,19 @@ export function App(): JSX.Element {
 				message="Are you sure you want to delete this chat? This action cannot be undone."
 				onConfirm={confirmDelete}
 				onCancel={closeDeleteModal}
+			/>
+
+			<UpdateModal
+				isOpen={showUpdateModal}
+				version={updateVersion}
+				isDownloading={updateDownloading}
+				downloadProgress={updateProgress}
+				isReady={updateReady}
+				error={updateError}
+				onDownload={handleDownloadUpdate}
+				onInstall={handleInstallUpdate}
+				onDismiss={handleDismissUpdate}
+				forceUpdate={forceUpdate}
 			/>
 		</div>
 	);

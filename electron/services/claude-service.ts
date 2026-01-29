@@ -1,18 +1,19 @@
 import Anthropic from '@anthropic-ai/sdk';
 import {app} from 'electron';
 import * as fs from 'fs/promises';
-import * as path from 'path';
+import path from 'path';
 import type {DatabaseService} from './database-service';
 import type {GitHubService} from './github-service';
+import {SecureStorageService} from './secure-storage-service';
 import {VectorStoreService} from './vector-store-service';
 
 export class ClaudeService {
-	private readonly apiKeyPath: string;
+	private readonly secureStorage: SecureStorageService;
 	private client: Anthropic | null               = null;
 	private vectorStore: VectorStoreService | null = null;
 
-	constructor() {
-		this.apiKeyPath = path.join(app.getPath('userData'), 'claude-api-key.txt');
+	constructor(secureStorage: SecureStorageService) {
+		this.secureStorage = secureStorage;
 	}
 
 	private async ensureVectorStore(): Promise<VectorStoreService | null> {
@@ -36,29 +37,22 @@ export class ClaudeService {
 	}
 
 	async getApiKey(): Promise<string | null> {
-		try {
-			const key = await fs.readFile(this.apiKeyPath, 'utf-8');
-			return key.trim();
-		} catch (error) {
-			return null;
-		}
+		// Load from encrypted storage
+		const key = await this.secureStorage.loadEncrypted('claude-api-key');
+		return key ? key.trim() : null;
 	}
 
 	async saveApiKey(apiKey: string): Promise<void> {
-		try {
-			// Trim whitespace and validate
-			const trimmedKey = apiKey.trim();
+		// Trim whitespace and validate
+		const trimmedKey = apiKey.trim();
 
-
-			if (!trimmedKey.startsWith('sk-ant-')) {
-				throw new Error('Invalid API key format. Must start with "sk-ant-"');
-			}
-
-			await fs.writeFile(this.apiKeyPath, trimmedKey, 'utf-8');
-			this.client = new Anthropic({apiKey: trimmedKey});
-		} catch (error) {
-			throw error;
+		if (!trimmedKey.startsWith('sk-ant-')) {
+			throw new Error('Invalid API key format. Must start with "sk-ant-"');
 		}
+
+		// Save to encrypted storage
+		await this.secureStorage.saveEncrypted('claude-api-key', trimmedKey);
+		this.client = new Anthropic({apiKey: trimmedKey});
 	}
 
 	private async ensureClient(): Promise<Anthropic> {
@@ -449,6 +443,41 @@ When the user asks for a "list", "extract", "export", "udtræk", "liste", "overs
 5. NEVER claim files are saved to Desktop or any other location - they are ALWAYS in the Downloads folder
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+USER INTERFACE GUIDANCE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+When users ask "how do I..." or "hvordan..." questions about performing tasks in SPY:
+
+ALWAYS provide step-by-step UI instructions with specific button names and menu locations:
+
+**Good Example:**
+"For at oprette en ny style:
+1. Klik på **'Styles'** i hovedmenuen
+2. Klik på **'Create New Style'** knappen i øverste højre hjørne
+3. Udfyld style nummer og navn
+4. Vælg brand og season
+5. Klik **'Save'**"
+
+**Bad Example:**
+"Du kan oprette en style gennem systemet" (TOO VAGUE)
+
+**Include:**
+- Menu names (e.g., "Styles", "Orders", "Tools")
+- Button labels (e.g., "Create New", "Save", "Export")
+- Field names (e.g., "Style Number", "Customer Name")
+- Navigation paths (e.g., "Settings → Users → Add User")
+- Keyboard shortcuts if known (e.g., "Ctrl+S to save")
+- Tab names if relevant
+- Modal/dialog names
+
+**For technical tasks:**
+- Include file paths when asked (e.g., "src/Components/StyleManager.tsx")
+- Include function/class names when relevant
+- Include database table names when querying
+
+Users need concrete, actionable steps - not general descriptions.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 OUTPUT RULES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 1. **Summary First**: Start with a summary sentence before any details',
@@ -810,22 +839,23 @@ OUTPUT RULES
 			});
 		}
 
-		// Ask Claude to rewrite it in simple language for support staff
+		// Ask Claude to rewrite it in clear language for support staff
 		simplificationMessages.push({
 			role   : 'user',
-			content: `Now rewrite your answer for non-technical customer support staff who have never programmed.
+			content: `Now rewrite your answer for customer support staff in a clear and helpful way.
 
-CRITICAL: Answer in the SAME LANGUAGE as the original question. If the question was in Danish, answer in Danish. If it was in English, answer in English.\n
+CRITICAL: Answer in the SAME LANGUAGE as the original question. If the question was in Danish, answer in Danish. If it was in English, answer in English.
 
-Requirements:
-- Use only everyday business language (customer, order, discount, price, invoice, delivery, etc.)
-- Explain WHAT happens, not HOW the system implements it
-- No code snippets, SQL queries, or technical terms
-- No file names, variable names, or implementation details
-- Write like you're explaining to someone who helps customers but doesn't know programming
+Guidelines:
+- Start with clear business language (customer, order, discount, price, invoice, delivery, etc.)
+- Explain WHAT happens and WHY it matters
+- Avoid unnecessary technical jargon that doesn't help understanding
+- BUT: If they ask for technical details (file names, class names, code locations, etc.), provide them directly
+- If they ask "what file", "what class", "where in the code" - answer specifically with file paths and names
+- Don't hide technical information when directly requested - support staff are capable of handling it
 - If you created a CSV file, mention where it was saved
 
-Keep the same information and accuracy, just express it in simple, clear business terms in the SAME LANGUAGE as the question.`,
+Balance: Be clear and accessible, but not dumbed down. Respect that support staff can handle technical details when needed.`,
 		});
 
 		// Get the simplified response (no tools needed here, CSV already created)

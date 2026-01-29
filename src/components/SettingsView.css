@@ -52,6 +52,12 @@
 	margin-bottom: 24px;
 }
 
+.form-btn-flex {
+	display: flex;
+	gap: 12px;
+	align-items: center;
+}
+
 .form-group label {
 	display: block;
 	margin-bottom: 8px;
@@ -196,7 +202,7 @@
 	font-size: 13px;
 	color: var(--text-secondary);
 	margin-bottom: 8px;
-	font-family: 'Consolas', 'Monaco', monospace;
+	font-family: "Consolas", "Monaco", monospace;
 }
 
 .badge {
@@ -360,7 +366,7 @@
 	background: var(--bg-primary);
 	border: 1px solid var(--border-color);
 	border-radius: 8px;
-	font-family: 'Monaco', 'Menlo', 'Consolas', monospace;
+	font-family: "Monaco", "Menlo", "Consolas", monospace;
 }
 
 .version-number {

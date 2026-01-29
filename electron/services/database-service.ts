@@ -1,11 +1,12 @@
-import * as mysql from 'mysql2/promise';
-import * as fs from 'fs/promises';
-import * as path from 'path';
 import {app} from 'electron';
+import * as fs from 'fs/promises';
+import * as mysql from 'mysql2/promise';
+import * as path from 'path';
 import type {DatabaseConfig, QueryResult} from '../types';
+import {SecureStorageService} from './secure-storage-service';
 
 /**
- * DatabaseService - CRITICAL SECURITY: READ-ONLY ENFORCED
+ * DatabaseService - CRITICAL SECURITY: READ-ONLY ENFORCED + ENCRYPTED PASSWORDS
  *
  * This service implements MULTIPLE LAYERS of security to make it PHYSICALLY IMPOSSIBLE to write to databases:
  *
@@ -14,23 +15,26 @@ import type {DatabaseConfig, QueryResult} from '../types';
  * Layer 3: Multiple Statement Protection - Prevents SQL injection via semicolons
  * Layer 4: MySQL Session Read-Only - Forces MySQL to reject any write attempts at the database level
  * Layer 5: Read-Only Transaction - Starts all connections in read-only transaction mode
+ * Layer 6: Encrypted Password Storage - Database passwords stored using OS-native encryption
  *
  * Even if all application-level checks are bypassed, the MySQL server itself will reject write operations.
  */
 export class DatabaseService {
 	private readonly configPath: string;
 	private readonly queryLogPath: string;
+	private readonly secureStorage: SecureStorageService;
 	private connections: Map<string, mysql.Connection> = new Map();
 
-	constructor() {
-		this.configPath = path.join(app.getPath('userData'), 'database-configs.json');
-		this.queryLogPath = path.join(app.getPath('userData'), 'query-log.txt');
+	constructor(secureStorage: SecureStorageService) {
+		this.configPath    = path.join(app.getPath('userData'), 'database-configs.json');
+		this.queryLogPath  = path.join(app.getPath('userData'), 'query-log.txt');
+		this.secureStorage = secureStorage;
 	}
 
 	private async logQuery(query: string, databaseName: string | undefined, configId: string, success: boolean, error?: string, rowCount?: number): Promise<void> {
 		try {
 			const timestamp = new Date().toISOString();
-			const logEntry = [
+			const logEntry  = [
 				'═'.repeat(80),
 				`[${timestamp}]`,
 				`Database: ${databaseName || 'N/A'}`,
@@ -88,8 +92,31 @@ export class DatabaseService {
 		const configs       = await this.getConfigs();
 		const existingIndex = configs.findIndex((c) => c.id === config.id);
 
+		// Save all sensitive data to encrypted storage
+		await this.secureStorage.saveEncrypted(`db-config-${config.id}`, JSON.stringify({
+			name    : config.name,
+			host    : config.host,
+			port    : config.port,
+			database: config.database,
+			username: config.username,
+			password: config.password,
+			readOnly: config.readOnly,
+		}));
+
+		// Only store ID in plain text
+		const safeConfig = {
+			id      : config.id,
+			name    : '', // Encrypted
+			host    : '', // Encrypted
+			port    : 0,  // Encrypted
+			database: '', // Encrypted
+			username: '', // Encrypted
+			password: '', // Encrypted
+			readOnly: true,
+		};
+
 		if (existingIndex >= 0) {
-			configs[existingIndex] = config;
+			configs[existingIndex] = safeConfig;
 			// Close existing connection so it will be recreated with new config
 			const connection       = this.connections.get(config.id);
 			if (connection) {
@@ -97,7 +124,7 @@ export class DatabaseService {
 				this.connections.delete(config.id);
 			}
 		} else {
-			configs.push(config);
+			configs.push(safeConfig);
 		}
 
 		await fs.writeFile(this.configPath, JSON.stringify(configs, null, 2));
@@ -105,8 +132,24 @@ export class DatabaseService {
 
 	async getConfigs(): Promise<DatabaseConfig[]> {
 		try {
-			const data = await fs.readFile(this.configPath, 'utf-8');
-			return JSON.parse(data);
+			const data    = await fs.readFile(this.configPath, 'utf-8');
+			const configs = JSON.parse(data) as DatabaseConfig[];
+
+			// Load full config from encrypted storage
+			return await Promise.all(
+				configs.map(async (config) => {
+					const encryptedData = await this.secureStorage.loadEncrypted(`db-config-${config.id}`);
+					if (encryptedData) {
+						const fullConfig = JSON.parse(encryptedData);
+						return {
+							id: config.id,
+							...fullConfig,
+						};
+					}
+					// Fallback to empty config if not found
+					return config;
+				}),
+			);
 		} catch (error) {
 			return [];
 		}
@@ -115,7 +158,23 @@ export class DatabaseService {
 	async deleteConfig(id: string): Promise<void> {
 		const configs  = await this.getConfigs();
 		const filtered = configs.filter((c) => c.id !== id);
-		await fs.writeFile(this.configPath, JSON.stringify(filtered, null, 2));
+
+		// Keep only IDs in plain text
+		const safeConfigs = filtered.map(config => ({
+			id      : config.id,
+			name    : '',
+			host    : '',
+			port    : 0,
+			database: '',
+			username: '',
+			password: '',
+			readOnly: true,
+		}));
+
+		await fs.writeFile(this.configPath, JSON.stringify(safeConfigs, null, 2));
+
+		// Delete encrypted config
+		await this.secureStorage.deleteEncrypted(`db-config-${id}`);
 
 		// Close connection if exists
 		const connection = this.connections.get(id);

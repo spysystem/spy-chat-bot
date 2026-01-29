@@ -7,21 +7,34 @@ import {ClaudeService} from './services/claude-service';
 import {DatabaseService} from './services/database-service';
 import type {GitHubConfig} from './services/github-service';
 import {GitHubService} from './services/github-service';
+import {SecureStorageService} from './services/secure-storage-service';
 import {SettingsService} from './services/settings-service';
 import type {DatabaseConfig} from './types';
 
-let mainWindow: BrowserWindow | null = null;
+let mainWindow: BrowserWindow | null  = null;
 let debugWindow: BrowserWindow | null = null;
-let pendingDeepLink: string | null = null;
-const claudeService                  = new ClaudeService();
-const databaseService                = new DatabaseService();
-const chatService                    = new ChatService();
-const githubService                  = new GitHubService();
-const settingsService                = new SettingsService();
+let pendingDeepLink: string | null    = null;
+
+// Initialize services with secure storage
+const secureStorage   = new SecureStorageService();
+const claudeService   = new ClaudeService(secureStorage);
+const databaseService = new DatabaseService(secureStorage);
+const chatService     = new ChatService();
+const githubService   = new GitHubService(secureStorage);
+const settingsService = new SettingsService();
 
 // Configure auto-updater
-autoUpdater.autoDownload = true;
+autoUpdater.autoDownload         = true;
 autoUpdater.autoInstallOnAppQuit = true;
+
+if (process.env.GH_TOKEN) {
+	autoUpdater.setFeedURL({
+		provider: 'github',
+		owner   : 'spysystem',
+		repo    : 'spy-chat-bot',
+		token   : process.env.GH_TOKEN,
+	});
+}
 
 // Debug logging helper
 function sendDebugLog(type: 'query' | 'tool' | 'api' | 'error' | 'info', category: string, message: string, details?: string): void {
@@ -38,8 +51,6 @@ function sendDebugLog(type: 'query' | 'tool' | 'api' | 'error' | 'info', categor
 
 // Handle deep links
 function handleDeepLink(url: string): void {
-	console.log('[Main] Deep link received:', url);
-
 	if (mainWindow && !mainWindow.isDestroyed()) {
 		// Window is ready, send to renderer
 		mainWindow.webContents.send('deep-link', url);
@@ -299,23 +310,23 @@ ipcMain.handle('check-for-updates', async () => {
 	try {
 		const result = await autoUpdater.checkForUpdates();
 		return {
-			available: result?.updateInfo.version !== app.getVersion(),
-			version: result?.updateInfo.version,
+			available     : result?.updateInfo.version !== app.getVersion(),
+			version       : result?.updateInfo.version,
 			currentVersion: app.getVersion(),
 		};
 	} catch (error) {
 		console.error('[AutoUpdater] Check for updates failed:', error);
-		return { available: false, error: String(error) };
+		return {available: false, error: String(error)};
 	}
 });
 
 ipcMain.handle('download-update', async () => {
 	try {
 		await autoUpdater.downloadUpdate();
-		return { success: true };
+		return {success: true};
 	} catch (error) {
 		console.error('[AutoUpdater] Download update failed:', error);
-		return { success: false, error: String(error) };
+		return {success: false, error: String(error)};
 	}
 });
 
