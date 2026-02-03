@@ -2,7 +2,7 @@ import {useState, useEffect, useRef, JSX} from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
-import type {Message, DatabaseConfig} from '../types';
+import type {AttachmentMeta, Message, DatabaseConfig} from '../types';
 import type {Chat} from '../types';
 import './ChatView.css';
 import 'highlight.js/styles/github-dark.css';
@@ -13,22 +13,25 @@ interface ChatViewProps {
 }
 
 export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
-	const [messages, setMessages]             = useState<Message[]>([]);
-	const [inputValue, setInputValue]         = useState('');
-	const [isLoading, setIsLoading]           = useState(false);
-	const [connection, setConnection]         = useState<DatabaseConfig | null>(null);
-	const [databaseName, setDatabaseName]     = useState<string>('');
-	const [hasApiKey, setHasApiKey]           = useState(false);
-	const [userName, setUserName]             = useState<string>('You');
-	const [progressStatus, setProgressStatus] = useState<string>('');
-	const [isInitialized, setIsInitialized]   = useState(false);
-	const [tldrMap, setTldrMap]               = useState<Map<number, { text: string; isShowing: boolean; isLoading: boolean }>>(new Map());
-	const [autoTldr, setAutoTldr]             = useState(false);
-	const [selectedChat, setSelectedChat]     = useState<Chat | null>(null);
-	const [githubBranch, setGithubBranch]     = useState<string>('');
-	const messagesEndReference                = useRef<HTMLDivElement>(null);
-	const previousChatIdReference             = useRef<string>(chatId);
-	const textareaReference                   = useRef<HTMLTextAreaElement>(null);
+	const [messages, setMessages]                         = useState<Message[]>([]);
+	const [inputValue, setInputValue]                     = useState('');
+	const [isLoading, setIsLoading]                       = useState(false);
+	const [connection, setConnection]                     = useState<DatabaseConfig | null>(null);
+	const [databaseName, setDatabaseName]                 = useState<string>('');
+	const [pendingAttachments, setPendingAttachments]     = useState<AttachmentMeta[]>([]);
+	const [attachmentPreviewMap, setAttachmentPreviewMap] = useState<Map<string, string>>(new Map()); // storedPath -> dataUrl
+	const [attachmentError, setAttachmentError]           = useState<string>('');
+	const [hasApiKey, setHasApiKey]                       = useState(false);
+	const [userName, setUserName]                         = useState<string>('You');
+	const [progressStatus, setProgressStatus]             = useState<string>('');
+	const [isInitialized, setIsInitialized]               = useState(false);
+	const [expandedMessageMap, setExpandedMessageMap]     = useState<Map<number, boolean>>(new Map());
+	const [selectedChat, setSelectedChat]                 = useState<Chat | null>(null);
+	const [githubBranch, setGithubBranch]                 = useState<string>('');
+	const messagesEndReference                            = useRef<HTMLDivElement>(null);
+	const previousChatIdReference                         = useRef<string>(chatId);
+	const textareaReference                               = useRef<HTMLTextAreaElement>(null);
+	const fileInputReference                              = useRef<HTMLInputElement>(null);
 
 	useEffect(() => {
 		async function initialize() {
@@ -36,7 +39,6 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 			await loadConnection();
 			await checkApiKey();
 			await loadUserName();
-			await loadAutoTldr();
 			await loadGithubBranch();
 			// Force window focus
 			await window.electronAPI.focusWindow();
@@ -70,6 +72,9 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 					timestamp: new Date(m.timestamp),
 				}));
 				setMessages(loadedMessages);
+				setExpandedMessageMap(new Map());
+				setPendingAttachments([]);
+				setAttachmentError('');
 
 				// Set the database name for this chat
 				if (chat.databaseName) {
@@ -79,6 +84,7 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 				}
 			} else {
 				setMessages([]);
+				setExpandedMessageMap(new Map());
 				setDatabaseName('');
 			}
 		}
@@ -106,9 +112,11 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 	async function saveDatabaseNameOnly(): Promise<void> {
 		// Convert current messages to storage format
 		const messagesToSave = messages.map((m) => ({
-			role     : m.role,
-			content  : m.content,
-			timestamp: m.timestamp.toISOString(),
+			role           : m.role,
+			content        : m.content,
+			detailedContent: m.detailedContent,
+			timestamp      : m.timestamp.toISOString(),
+			attachments    : m.attachments,
 		}));
 
 		await window.electronAPI.updateChat(chatId, messagesToSave, undefined, databaseName, selectedChat?.branch);
@@ -135,11 +143,6 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 		}
 	}
 
-	async function loadAutoTldr(): Promise<void> {
-		const enabled = await window.electronAPI.getAutoTldr();
-		setAutoTldr(enabled);
-	}
-
 	async function loadGithubBranch(): Promise<void> {
 		const config = await window.electronAPI.getGitHubConfig();
 		if (config?.branch) {
@@ -155,29 +158,78 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 	async function saveMessages(updatedMessages: Message[]): Promise<void> {
 		// Convert Date objects to ISO strings for storage
 		const messagesToSave = updatedMessages.map((m) => ({
-			role     : m.role,
-			content  : m.content,
-			timestamp: m.timestamp.toISOString(),
+			role           : m.role,
+			content        : m.content,
+			detailedContent: m.detailedContent,
+			timestamp      : m.timestamp.toISOString(),
+			attachments    : m.attachments,
 		}));
 
 		await window.electronAPI.updateChat(chatId, messagesToSave, undefined, databaseName, selectedChat?.branch);
 		onChatUpdate();
 	}
 
+	function toBase64(buffer: ArrayBuffer): string {
+		const bytes = new Uint8Array(buffer);
+		let binary  = '';
+		for (let i = 0; i < bytes.byteLength; i++) {
+			binary += String.fromCharCode(bytes[i]);
+		}
+		return btoa(binary);
+	}
+
+	async function addFileAsAttachment(file: File): Promise<void> {
+		setAttachmentError('');
+		if (file.size > 10 * 1024 * 1024) {
+			setAttachmentError('Attachment too large (max 10 MB).');
+			return;
+		}
+		const buffer = await file.arrayBuffer();
+		const base64 = toBase64(buffer);
+		const meta   = await window.electronAPI.saveAttachment(chatId, file.name, file.type || undefined, base64);
+		setPendingAttachments((prev) => [...prev, meta]);
+
+		// Preload previews for images
+		if (meta.mimeType.startsWith('image/')) {
+			const dataUrl = await window.electronAPI.getAttachmentDataUrl(meta.storedPath, meta.mimeType);
+			setAttachmentPreviewMap((prev) => {
+				const next = new Map(prev);
+				next.set(meta.storedPath, dataUrl);
+				return next;
+			});
+		}
+	}
+
+	async function handleFileInputChange(event: React.ChangeEvent<HTMLInputElement>): Promise<void> {
+		const files = event.target.files ? Array.from(event.target.files) : [];
+		for (const f of files) {
+			// eslint-disable-next-line no-await-in-loop
+			await addFileAsAttachment(f);
+		}
+		// reset input so selecting the same file again still triggers change
+		event.target.value = '';
+	}
+
+	function removePendingAttachment(id: string): void {
+		setPendingAttachments((prev) => prev.filter((a) => a.id !== id));
+	}
+
 	async function handleSend(): Promise<void> {
-		if (!inputValue.trim() || isLoading) {
+		if ((!inputValue.trim() && pendingAttachments.length === 0) || isLoading) {
 			return;
 		}
 
 		const userMessage: Message = {
-			role     : 'user',
-			content  : inputValue,
-			timestamp: new Date(),
+			role       : 'user',
+			content    : inputValue,
+			timestamp  : new Date(),
+			attachments: pendingAttachments.length > 0 ? pendingAttachments : undefined,
 		};
 
 		const newMessages = [...messages, userMessage];
 		setMessages(newMessages);
 		setInputValue('');
+		setPendingAttachments([]);
 		setIsLoading(true);
 		setProgressStatus('Preparing...');
 
@@ -198,29 +250,26 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 			const dbName      = databaseName.trim() || undefined;
 
 			const response = await window.electronAPI.sendMessage(
+				chatId,
 				inputValue,
 				databaseIds,
 				conversationHistory,
 				dbName,
+				pendingAttachments,
 			);
 
 			setProgressStatus('');
 
 			const assistantMessage: Message = {
-				role     : 'assistant',
-				content  : response,
-				timestamp: new Date(),
+				role           : 'assistant',
+				content        : response.shortAnswer,
+				detailedContent: response.detailedAnswer || undefined,
+				timestamp      : new Date(),
 			};
 
 			const finalMessages = [...newMessages, assistantMessage];
 			setMessages(finalMessages);
 			await saveMessages(finalMessages);
-
-			// If auto TL;DR is enabled, generate it automatically for the new message
-			if (autoTldr) {
-				const messageIndex = finalMessages.length - 1;
-				generateTldr(messageIndex, response);
-			}
 		} catch (error) {
 			const errorMessage: Message = {
 				role     : 'assistant',
@@ -237,52 +286,12 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 		}
 	}
 
-	async function generateTldr(messageIndex: number, messageContent: string): Promise<void> {
-		// Update loading state
-		setTldrMap((previous) => {
-			const newMap   = new Map(previous);
-			const existing = newMap.get(messageIndex);
-			newMap.set(messageIndex, {
-				text     : existing?.text || '',
-				isShowing: true,
-				isLoading: true,
-			});
-			return newMap;
-		});
-
-		try {
-			const tldrText = await window.electronAPI.generateTldr(messageContent);
-
-			setTldrMap((previous) => {
-				const newMap = new Map(previous);
-				newMap.set(messageIndex, {
-					text     : tldrText,
-					isShowing: true,
-					isLoading: false,
-				});
-				return newMap;
-			});
-		} catch (error) {
-			console.error('Error generating TL;DR:', error);
-			setTldrMap((previous) => {
-				const newMap = new Map(previous);
-				newMap.delete(messageIndex);
-				return newMap;
-			});
-		}
-	}
-
-	function toggleTldr(messageIndex: number): void {
-		setTldrMap((previous) => {
-			const newMap   = new Map(previous);
-			const existing = newMap.get(messageIndex);
-			if (existing) {
-				newMap.set(messageIndex, {
-					...existing,
-					isShowing: !existing.isShowing,
-				});
-			}
-			return newMap;
+	function toggleExpanded(messageIndex: number): void {
+		setExpandedMessageMap((previous) => {
+			const next     = new Map(previous);
+			const existing = next.get(messageIndex) || false;
+			next.set(messageIndex, !existing);
+			return next;
 		});
 	}
 
@@ -309,18 +318,20 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 
 	return (
 		<div className="chat-view">
-			{(selectedChat?.branch || githubBranch) && (
-				<div className="branch-badge">
-					<span className="branch-icon">🔀</span>
-					<span className="branch-name">{selectedChat?.branch || githubBranch}</span>
-				</div>
-			)}
-			{connection?.host && (
-				<div className="server-badge">
-					<span className="server-icon">🖥️</span>
-					<span className="server-name">{getServerDisplayName(connection.host)}</span>
-				</div>
-			)}
+			<div className="badge-container">
+				{(selectedChat?.branch || githubBranch) && (
+					<div className="branch-badge">
+						<span className="branch-icon">🔀</span>
+						<span className="branch-name">{selectedChat?.branch || githubBranch}</span>
+					</div>
+				)}
+				{connection?.host && (
+					<div className="server-badge">
+						<span className="server-icon">🖥️</span>
+						<span className="server-name">{getServerDisplayName(connection.host)}</span>
+					</div>
+				)}
+			</div>
 			{connection && (
 				<div className="database-selector">
 					<label htmlFor="database-name">Database (optional):</label>
@@ -345,8 +356,9 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 				)}
 
 				{messages.map((message, index) => {
-					const tldrInfo    = tldrMap.get(index);
-					const showingTldr = tldrInfo?.isShowing && tldrInfo?.text;
+					const hasDetailed = message.role === 'assistant' && !!message.detailedContent && message.detailedContent.trim() !== '' && message.detailedContent.trim() !== message.content.trim();
+					const isExpanded  = expandedMessageMap.get(index) || false;
+					const shownText   = (hasDetailed && isExpanded) ? (message.detailedContent as string) : message.content;
 
 					return (
 						<div key={index} className={`message ${message.role}`}>
@@ -360,36 +372,55 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 										{message.timestamp.toLocaleTimeString()}
 									</span>
 								</div>
-								{message.role === 'assistant' && (
+								{hasDetailed && (
 									<div className="message-actions">
-										{tldrInfo?.text ? (
-											<button
-												className="tldr-button"
-												onClick={() => toggleTldr(index)}
-												title={showingTldr ? 'Show full answer' : 'Show TL;DR'}
-											>
-												{showingTldr ? '📄 Full' : '⚡ TL;DR'}
-											</button>
-										) : (
-											<button
-												className="tldr-button"
-												onClick={() => generateTldr(index, message.content)}
-												disabled={tldrInfo?.isLoading}
-												title="Generate short summary"
-											>
-												{tldrInfo?.isLoading ? '⏳' : '⚡ TL;DR'}
-											</button>
-										)}
+										<button
+											className="details-button"
+											onClick={() => toggleExpanded(index)}
+											title={isExpanded ? 'Show short answer' : 'Show detailed answer'}
+										>
+											{isExpanded ? 'Short' : 'Details'}
+										</button>
 									</div>
 								)}
 							</div>
 							<div className="message-content">
+								{message.attachments && message.attachments.length > 0 && (
+									<div className="message-attachments">
+										{message.attachments.map((att) => {
+											const isImage = att.mimeType.startsWith('image/');
+											const preview = isImage ? attachmentPreviewMap.get(att.storedPath) : undefined;
+											return (
+												<div key={att.id} className="message-attachment">
+													{isImage && preview && (
+														<img
+															src={preview}
+															alt={att.originalName}
+															className="attachment-image"
+															onClick={async () => await window.electronAPI.openAttachment(att.storedPath)}
+														/>
+													)}
+													<div className="attachment-meta">
+														<div className="attachment-name">{att.originalName}</div>
+														<div className="attachment-size">{Math.round(att.sizeBytes / 1024)} KB</div>
+													</div>
+													<button
+														className="attachment-open"
+														onClick={async () => await window.electronAPI.openAttachment(att.storedPath)}
+													>
+														Open
+													</button>
+												</div>
+											);
+										})}
+									</div>
+								)}
 								{message.role === 'assistant' ? (
 									<ReactMarkdown
 										remarkPlugins={[remarkGfm]}
 										rehypePlugins={[rehypeHighlight]}
 									>
-										{showingTldr ? tldrInfo.text : message.content}
+										{shownText}
 									</ReactMarkdown>
 								) : (
 									<p>{message.content}</p>
@@ -424,10 +455,43 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 			</div>
 
 			<div className="input-area">
+				<input
+					ref={fileInputReference}
+					type="file"
+					style={{display: 'none'}}
+					multiple
+					onChange={handleFileInputChange}
+				/>
+				{pendingAttachments.length > 0 && (
+					<div className="pending-attachments">
+						{pendingAttachments.map((att) => (
+							<div key={att.id} className="pending-attachment">
+								<span className="pending-attachment-name">{att.originalName}</span>
+								<button className="pending-attachment-remove" onClick={() => removePendingAttachment(att.id)}>
+									Remove
+								</button>
+							</div>
+						))}
+					</div>
+				)}
+				{attachmentError && (
+					<div className="attachment-error">{attachmentError}</div>
+				)}
 				<textarea
 					ref={textareaReference}
 					value={inputValue}
 					onChange={(event) => setInputValue(event.target.value)}
+					onPaste={async (event) => {
+						const items     = Array.from(event.clipboardData.items);
+						const imageItem = items.find((i) => i.kind === 'file' && i.type.startsWith('image/'));
+						if (imageItem) {
+							const file = imageItem.getAsFile();
+							if (file) {
+								event.preventDefault();
+								await addFileAsAttachment(file);
+							}
+						}
+					}}
 					onKeyDown={(event) => {
 						if (event.key === 'Enter' && !event.shiftKey) {
 							event.preventDefault();
@@ -438,7 +502,14 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 					disabled={isLoading}
 					autoFocus
 				/>
-				<button onClick={handleSend} disabled={isLoading || !inputValue.trim()}>
+				<button
+					onClick={() => fileInputReference.current?.click()}
+					disabled={isLoading}
+					className="attach-button"
+				>
+					Attach
+				</button>
+				<button onClick={handleSend} disabled={isLoading || (!inputValue.trim() && pendingAttachments.length === 0)}>
 					Send
 				</button>
 			</div>

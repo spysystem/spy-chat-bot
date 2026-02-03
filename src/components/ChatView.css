@@ -196,7 +196,7 @@
 	gap: 8px;
 }
 
-.tldr-button {
+.details-button {
 	padding: 6px 12px;
 	background: var(--bg-tertiary);
 	border: 1px solid var(--border-color);
@@ -209,13 +209,13 @@
 	white-space: nowrap;
 }
 
-.tldr-button:hover:not(:disabled) {
+.details-button:hover:not(:disabled) {
 	background: var(--accent-color);
 	color: white;
 	border-color: var(--accent-color);
 }
 
-.tldr-button:disabled {
+.details-button:disabled {
 	opacity: 0.5;
 	cursor: not-allowed;
 }
@@ -444,6 +444,7 @@
 	gap: 16px;
 	margin: 0 auto;
 	width: 100%;
+	position: relative;
 }
 
 .input-area textarea {
@@ -487,6 +488,142 @@
 	transform: translateY(-1px);
 }
 
+.input-area button.attach-button {
+	background: var(--bg-tertiary);
+	color: var(--text-primary);
+	border: 1px solid var(--border-color);
+	box-shadow: none;
+}
+
+.input-area button.attach-button:hover:not(:disabled) {
+	background: var(--bg-hover);
+	border-color: var(--accent-color);
+	box-shadow: none;
+	transform: none;
+}
+
+.pending-attachments {
+	position: absolute;
+	left: 0;
+	right: 0;
+	bottom: calc(100% + 12px);
+	background: var(--bg-secondary);
+	border: 1px solid var(--border-color);
+	border-radius: 14px;
+	padding: 10px 12px;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	box-shadow: var(--shadow-sm);
+}
+
+.pending-attachment {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	gap: 12px;
+	font-size: 13px;
+}
+
+.pending-attachment-name {
+	color: var(--text-primary);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.pending-attachment-remove {
+	background: transparent;
+	border: 1px solid var(--border-color);
+	color: var(--text-secondary);
+	border-radius: 10px;
+	padding: 6px 10px;
+	cursor: pointer;
+	font-size: 12px;
+}
+
+.pending-attachment-remove:hover {
+	border-color: var(--danger-color);
+	color: var(--danger-color);
+}
+
+.attachment-error {
+	position: absolute;
+	left: 0;
+	right: 0;
+	bottom: calc(100% + 12px);
+	padding: 10px 12px;
+	border-radius: 14px;
+	background: rgba(244, 67, 54, 0.1);
+	border: 1px solid rgba(244, 67, 54, 0.4);
+	color: var(--text-primary);
+	font-size: 13px;
+}
+
+.message-attachments {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	margin-bottom: 12px;
+}
+
+.message-attachment {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	padding: 10px;
+	border: 1px solid var(--border-color);
+	background: var(--bg-tertiary);
+	border-radius: 12px;
+}
+
+.attachment-image {
+	width: 64px;
+	height: 64px;
+	object-fit: cover;
+	border-radius: 10px;
+	border: 1px solid var(--border-color);
+	cursor: pointer;
+}
+
+.attachment-meta {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	flex: 1;
+	min-width: 0;
+}
+
+.attachment-name {
+	color: var(--text-primary);
+	font-size: 13px;
+	font-weight: 700;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.attachment-size {
+	color: var(--text-secondary);
+	font-size: 12px;
+}
+
+.attachment-open {
+	background: var(--bg-primary);
+	border: 1px solid var(--border-color);
+	color: var(--text-primary);
+	border-radius: 12px;
+	padding: 10px 14px;
+	cursor: pointer;
+	font-size: 13px;
+	font-weight: 600;
+}
+
+.attachment-open:hover {
+	border-color: var(--accent-color);
+	background: var(--bg-hover);
+}
+
 .input-area button:active:not(:disabled) {
 	transform: translateY(0);
 }
@@ -520,10 +657,15 @@
 	line-height: 1.6;
 }
 
-.branch-badge {
+.badge-container {
+	display: flex;
+	gap: 15px;
 	position: absolute;
 	top: 20px;
 	right: 32px;
+}
+
+.branch-badge {
 	display: flex;
 	align-items: center;
 	gap: 8px;
@@ -549,9 +691,6 @@
 }
 
 .server-badge {
-	position: absolute;
-	top: 20px;
-	right: 165px;
 	display: flex;
 	align-items: center;
 	gap: 8px;

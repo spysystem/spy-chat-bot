@@ -11,17 +11,55 @@ contextBridge.exposeInMainWorld('electronAPI', {
 	getDatabaseConfigs: () =>
 		ipcRenderer.invoke('get-database-configs'),
 
-	sendMessage: (message: string, databases: string[], history?: Array<{ role: string; content: string }>, databaseName?: string) =>
-		ipcRenderer.invoke('send-message', message, databases, history, databaseName),
+	// Schema index
+	getSchemaIndexStatus: (configId: string) =>
+		ipcRenderer.invoke('get-schema-index-status', configId),
+
+	generateSchemaIndex: (configId: string, databaseName: string) =>
+		ipcRenderer.invoke('generate-schema-index', configId, databaseName),
+
+	onSchemaIndexProgress: (callback: (progress: { stage: string; done: number; total: number }) => void) => {
+		const listener = (_event: any, progress: { stage: string; done: number; total: number }) => callback(progress);
+		ipcRenderer.on('schema-index-progress', listener);
+		return () => {
+			ipcRenderer.removeListener('schema-index-progress', listener);
+		};
+	},
+
+	onSchemaIndexComplete: (callback: (status: any) => void) => {
+		const listener = (_event: any, status: any) => callback(status);
+		ipcRenderer.on('schema-index-complete', listener);
+		return () => {
+			ipcRenderer.removeListener('schema-index-complete', listener);
+		};
+	},
+
+	onSchemaIndexError: (callback: (error: string) => void) => {
+		const listener = (_event: any, error: string) => callback(error);
+		ipcRenderer.on('schema-index-error', listener);
+		return () => {
+			ipcRenderer.removeListener('schema-index-error', listener);
+		};
+	},
+
+	// Attachments
+	saveAttachment: (chatId: string, originalName: string, mimeType: string | undefined, dataBase64: string) =>
+		ipcRenderer.invoke('save-attachment', chatId, originalName, mimeType, dataBase64),
+
+	getAttachmentDataUrl: (storedPath: string, mimeType: string) =>
+		ipcRenderer.invoke('get-attachment-data-url', storedPath, mimeType),
+
+	openAttachment: (storedPath: string) =>
+		ipcRenderer.invoke('open-attachment', storedPath),
+
+	sendMessage: (chatId: string, message: string, databases: string[], history?: Array<{ role: string; content: string }>, databaseName?: string, attachments?: any[]) =>
+		ipcRenderer.invoke('send-message', chatId, message, databases, history, databaseName, attachments),
 
 	getApiKey: () =>
 		ipcRenderer.invoke('get-api-key'),
 
 	saveApiKey: (apiKey: string) =>
 		ipcRenderer.invoke('save-api-key', apiKey),
-
-	generateTldr: (messageContent: string) =>
-		ipcRenderer.invoke('generate-tldr', messageContent),
 
 	// Chat management
 	getChats: () =>
@@ -38,6 +76,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
 	deleteChat: (chatId: string) =>
 		ipcRenderer.invoke('delete-chat', chatId),
+
+	setWorkingSummary: (chatId: string, text: string) =>
+		ipcRenderer.invoke('set-working-summary', chatId, text),
+
+	clearWorkingSummary: (chatId: string) =>
+		ipcRenderer.invoke('clear-working-summary', chatId),
 
 	// Progress updates
 	onMessageProgress: (callback: (status: string) => void) => {
@@ -64,12 +108,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
 	saveUserName: (userName: string) =>
 		ipcRenderer.invoke('save-user-name', userName),
-
-	getAutoTldr: () =>
-		ipcRenderer.invoke('get-auto-tldr'),
-
-	saveAutoTldr: (autoTldr: boolean) =>
-		ipcRenderer.invoke('save-auto-tldr', autoTldr),
 
 	// Window focus
 	focusWindow: () =>

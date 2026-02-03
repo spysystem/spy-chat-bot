@@ -5,6 +5,9 @@ import path from 'path';
 import type {DatabaseService} from './database-service';
 import type {GitHubService} from './github-service';
 import {SecureStorageService} from './secure-storage-service';
+import type {SchemaIndexService} from './schema-index-service';
+import type {ChatService} from './chat-service';
+import type {AttachmentMeta, AttachmentService} from './attachment-service';
 import {VectorStoreService} from './vector-store-service';
 
 export class ClaudeService {
@@ -77,6 +80,31 @@ export class ClaudeService {
 		return value;
 	}
 
+	private truncateLargeToolResult(result: unknown, maxRows: number = 100): { truncated: boolean; data: unknown } {
+		// Check if result is a database query result with rows
+		const queryResult = result as { rows?: any[]; rowCount?: number; [key: string]: any };
+
+		if (queryResult.rows && Array.isArray(queryResult.rows)) {
+			const totalRows = queryResult.rows.length;
+
+			if (totalRows > maxRows) {
+				// Truncate to maxRows and add metadata
+				return {
+					truncated: true,
+					data: {
+						...queryResult,
+						rows: queryResult.rows.slice(0, maxRows),
+						originalRowCount: totalRows,
+						truncatedRowCount: maxRows,
+						truncationNote: `Result truncated: showing first ${maxRows} of ${totalRows} rows. Use LIMIT in your query to control output size.`,
+					},
+				};
+			}
+		}
+
+		return { truncated: false, data: result };
+	}
+
 	private async exportToCsv(filename: string, data: Array<Record<string, unknown>>): Promise<Record<string, unknown>> {
 		if (data.length === 0) {
 			return {error: 'No data to export'};
@@ -111,15 +139,200 @@ export class ClaudeService {
 	}
 
 	async sendMessage(
+		chatId: string,
 		userMessage: string,
 		databaseIds: string[],
 		databaseService: DatabaseService,
 		githubService: GitHubService,
+		schemaIndexService: SchemaIndexService,
+		chatService: ChatService,
+		attachmentService: AttachmentService,
 		onProgress?: (status: string) => void,
 		conversationHistory?: Array<{ role: string; content: string }>,
 		databaseName?: string,
+		attachments?: AttachmentMeta[],
 		onDebugLog?: (type: 'query' | 'tool' | 'api' | 'error' | 'info', category: string, message: string, details?: string) => void,
-	): Promise<string> {
+	): Promise<{ shortAnswer: string; detailedAnswer: string }> {
+		const looksLikeUiQuestion = (text: string): boolean => {
+			const t = text.toLowerCase();
+			// Danish + English UI intent keywords
+			return /(\bhvordan\b|\bhvor\b|\bklik\b|\bknap\b|\bmenu\b|\bfane\b|\bfelt\b|\bside\b|\bskærm\b|\bui\b|\binterface\b|\bfind\b|\bopret\b|\bredig(é|e)r\b|\bslet\b|\bfilter\b|\bsøg\b|\bexport\b|\budtræk\b|\boversigt\b|\bwhy\b|\bwhere\b|\bbutton\b|\bmenu\b|\bpage\b|\bfield\b)/i
+				.test(t);
+		};
+
+		const extractSearchKeywords = (text: string, max: number = 4): string[] => {
+			const stop = new Set([
+				'hvordan', 'hvor', 'hvad', 'hvem', 'hvorfor', 'kan', 'jeg', 'vi', 'man', 'min', 'mit', 'mine',
+				'det', 'den', 'der', 'som', 'til', 'på', 'i', 'af', 'og', 'eller', 'med', 'fra', 'for', 'at',
+				'the', 'a', 'an', 'and', 'or', 'to', 'in', 'on', 'of', 'for', 'with', 'is', 'are', 'do', 'does',
+			]);
+			const words = (text.toLowerCase().match(/[a-zæøå0-9_]+/gi) || [])
+				.map((w) => w.trim())
+				.filter((w) => w.length >= 4 && !stop.has(w));
+			return Array.from(new Set(words)).slice(0, max);
+		};
+
+		const formatUiCodeSearchResults = (results: Array<{ path: string; matches: string[] }>): string => {
+			if (!results || results.length === 0) {
+				return '';
+			}
+			const lines: string[] = [];
+			lines.push('UI CODE SEARCH RESULTS (SPY REPO)');
+			lines.push('Use these to ground exact menu/button/field labels. Do NOT invent labels.');
+			for (const r of results.slice(0, 5)) {
+				const frag = (r.matches && r.matches.length > 0) ? r.matches[0].replace(/\s+/g, ' ').trim() : '';
+				lines.push(`- ${r.path}${frag ? `: ${frag}` : ''}`);
+			}
+			return lines.join('\n');
+		};
+
+		const sqlKeywordSet = new Set([
+			'SELECT', 'FROM', 'WHERE', 'JOIN', 'LEFT', 'RIGHT', 'INNER', 'OUTER', 'ON',
+			'GROUP', 'BY', 'ORDER', 'LIMIT', 'HAVING', 'AS', 'DISTINCT',
+			'COUNT', 'SUM', 'AVG', 'MIN', 'MAX',
+			'CASE', 'WHEN', 'THEN', 'ELSE', 'END',
+			'AND', 'OR', 'NOT', 'IN', 'IS', 'NULL', 'LIKE', 'BETWEEN', 'EXISTS',
+			'UNION', 'ALL',
+			'DESC', 'ASC',
+			'TRUE', 'FALSE',
+		]);
+
+		const extractTableNames = (sql: string): string[] => {
+			const names: string[] = [];
+			const re              = /\b(?:FROM|JOIN)\s+`?([a-zA-Z0-9_]+)`?/gi;
+			let m: RegExpExecArray | null;
+			while ((m = re.exec(sql)) !== null) {
+				if (m[1]) {
+					names.push(m[1]);
+				}
+			}
+			return Array.from(new Set(names));
+		};
+
+		const extractPossibleColumnNamesSingleTable = (sql: string): string[] => {
+			// Conservative heuristic: only validate identifiers used in WHERE for single-table queries.
+			// This avoids false positives for SELECT aliases like "COUNT(*) AS total".
+			const whereMatch = sql.match(/\bWHERE\b([\s\S]*?)(\bGROUP\b|\bORDER\b|\bLIMIT\b|\bHAVING\b|$)/i);
+			if (!whereMatch) {
+				return [];
+			}
+			const whereSql = whereMatch[1] ?? '';
+
+			const tokens = whereSql
+				.replace(/'[^']*'/g, ' ') // remove single-quoted strings
+				.replace(/"[^"]*"/g, ' ') // remove double-quoted strings
+				.match(/[a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)?|`[a-zA-Z0-9_]+`(?:\.`[a-zA-Z0-9_]+`)?/g) || [];
+
+			const out: string[] = [];
+			for (const raw of tokens) {
+				// Support qualified identifiers like customers.type
+				const cleanedRaw = raw.replace(/`/g, '');
+				const parts      = cleanedRaw.split('.');
+				const ident      = parts.length === 2 ? parts[1] : parts[0];
+				if (!ident) {
+					continue;
+				}
+				const upper = ident.toUpperCase();
+				if (sqlKeywordSet.has(upper)) {
+					continue;
+				}
+				if (ident.length <= 1) {
+					continue;
+				}
+				out.push(ident);
+			}
+			return Array.from(new Set(out));
+		};
+
+		const suggestColumnsFromTable = (
+			table: { tableName: string; columns: Array<{ columnName: string }> },
+			needle: string,
+			limit: number = 10,
+		): Array<{ tableName: string; columnName: string }> => {
+			const needleLower                                                   = needle.toLowerCase();
+			const suggestions: Array<{ tableName: string; columnName: string }> = [];
+			const tryNeedles                                                    = Array.from(new Set([
+				needleLower,
+				...needleLower.split('_').filter((p) => p.length >= 3),
+			]));
+
+			for (const n of tryNeedles) {
+				for (const c of table.columns) {
+					if (c.columnName.toLowerCase().includes(n)) {
+						suggestions.push({tableName: table.tableName, columnName: c.columnName});
+						if (suggestions.length >= limit) {
+							return suggestions;
+						}
+					}
+				}
+			}
+			return suggestions;
+		};
+
+		const preflightQueryAgainstSchemaIndex = async (configId: string, sql: string): Promise<{
+			ok: boolean;
+			error?: string;
+			hints?: any;
+		}> => {
+			const index = await schemaIndexService.loadIndex(configId);
+			if (!index) {
+				return {ok: true};
+			}
+
+			const tables = extractTableNames(sql);
+			if (tables.length === 0) {
+				return {ok: true};
+			}
+
+			const missingTables = tables.filter((t) => !schemaIndexService.getTable(index, t));
+			if (missingTables.length > 0) {
+				return {
+					ok   : false,
+					error: `Schema index: table(s) not found: ${missingTables.join(', ')}`,
+					hints: {
+						unknownTable: missingTables.map((t) => ({
+							requested  : t,
+							suggestions: schemaIndexService.searchSchema(index, t, 10),
+						})),
+					},
+				};
+			}
+
+			// Only attempt column validation for simple single-table queries (no JOINs).
+			const hasJoin = /\bJOIN\b/i.test(sql);
+			if (tables.length === 1 && !hasJoin) {
+				const table = schemaIndexService.getTable(index, tables[0]);
+				if (table) {
+					const columnSet  = new Set(table.columns.map((c) => c.columnName.toLowerCase()));
+					const candidates = extractPossibleColumnNamesSingleTable(sql)
+						.filter((c) => c.toLowerCase() !== table.tableName.toLowerCase());
+
+					const missingCols = candidates.filter((c) => !columnSet.has(c.toLowerCase()));
+					// Only block if it looks like a clear mismatch (avoid over-blocking on aliases).
+					if (missingCols.length > 0) {
+						const suggestions: Array<{ requested: string; suggestions: Array<{ tableName: string; columnName: string }> }> = [];
+						for (const col of missingCols.slice(0, 5)) {
+							const s = suggestColumnsFromTable(table, col, 10);
+							suggestions.push({requested: col, suggestions: s});
+						}
+
+						return {
+							ok   : false,
+							error: `Schema index: potential unknown column(s) in ${table.tableName}`,
+							hints: {
+								table         : table.tableName,
+								missingColumns: missingCols.slice(0, 10),
+								suggestions,
+								note          : 'If these are aliases (AS ...), qualify columns or rename aliases. Otherwise, use get_table_schema_cached to verify exact column names.',
+							},
+						};
+					}
+				}
+			}
+
+			return {ok: true};
+		};
+
 		// Get database connection info for context
 		let dbServerHost = '';
 		if (databaseIds.length > 0) {
@@ -156,7 +369,7 @@ export class ClaudeService {
 
 					tools.push({
 						name        : `query_${toolSuffix}`,
-						description : `Execute a READ-ONLY SQL query on database: ${dbDisplayName}. ONLY SELECT, SHOW, DESCRIBE, and EXPLAIN queries are allowed. Write operations (INSERT, UPDATE, DELETE, etc.) are NEVER permitted.`,
+						description : `Execute a READ-ONLY SQL query on database: ${dbDisplayName}. BEFORE running complex queries, verify table/column names using the LOCAL schema index tools (search_schema / get_table_schema_cached) when available. ONLY SELECT, SHOW, DESCRIBE, and EXPLAIN queries are allowed. Write operations (INSERT, UPDATE, DELETE, etc.) are NEVER permitted.`,
 						input_schema: {
 							type      : 'object',
 							properties: {
@@ -187,6 +400,40 @@ export class ClaudeService {
 								table_name: {
 									type       : 'string',
 									description: 'Name of the table to describe',
+								},
+							},
+							required  : ['table_name'],
+						},
+					});
+
+					tools.push({
+						name        : `search_schema_${toolSuffix}`,
+						description : `Search the LOCAL schema index (tables, columns, keys) for database: ${dbDisplayName}. Prefer this over DESCRIBE when the schema index has been generated in Settings.`,
+						input_schema: {
+							type      : 'object',
+							properties: {
+								query: {
+									type       : 'string',
+									description: 'Search query for tables/columns (case-insensitive substring match)',
+								},
+								limit: {
+									type       : 'number',
+									description: 'Maximum number of table matches to return (default 10)',
+								},
+							},
+							required  : ['query'],
+						},
+					});
+
+					tools.push({
+						name        : `get_table_schema_cached_${toolSuffix}`,
+						description : `Get table schema from the LOCAL schema index for database: ${dbDisplayName}. Prefer this over DESCRIBE when the schema index has been generated in Settings.`,
+						input_schema: {
+							type      : 'object',
+							properties: {
+								table_name: {
+									type       : 'string',
+									description: 'Name of the table to look up in the local schema index',
 								},
 							},
 							required  : ['table_name'],
@@ -287,11 +534,75 @@ export class ClaudeService {
 			}
 		}
 
-		// Add the new user message
-		messages.push({
-			role   : 'user',
-			content: userMessage,
-		});
+		// Add the new user message (with optional attachments)
+		let userText = userMessage;
+		const contentBlocks: any[] = [];
+		try {
+			if (attachments && attachments.length > 0) {
+				onProgress?.(`Processing ${attachments.length} attachment(s)...`);
+				for (const att of attachments) {
+					if (att.mimeType && att.mimeType.startsWith('image/')) {
+						const buf = await attachmentService.readAttachmentBuffer(att.storedPath);
+						contentBlocks.push({
+							type  : 'image',
+							source: {
+								type      : 'base64',
+								media_type: att.mimeType,
+								data      : buf.toString('base64'),
+							},
+						});
+						continue;
+					}
+
+					const extracted = await attachmentService.extractTextForClaude(att.storedPath, att.mimeType, 40_000);
+					if (extracted.text.trim() !== '') {
+						userText += `\n\nATTACHMENT: ${att.originalName} (${att.mimeType}, ${Math.round(att.sizeBytes / 1024)} KB)\n${extracted.text}${extracted.truncated ? '\n\n[Truncated]' : ''}`;
+					} else {
+						userText += `\n\nATTACHMENT: ${att.originalName} (${att.mimeType}, ${Math.round(att.sizeBytes / 1024)} KB)\n[Binary or unsupported file type for text extraction]`;
+					}
+				}
+				onDebugLog?.('info', 'Attachments', `Included ${attachments.length} attachment(s) in message`);
+			}
+		} catch (error) {
+			onDebugLog?.('error', 'Attachments', 'Failed to process attachments', String(error));
+		}
+
+		if (attachments && attachments.length > 0) {
+			contentBlocks.unshift({type: 'text', text: userText});
+			messages.push({
+				role   : 'user',
+				content: contentBlocks,
+			});
+		} else {
+			messages.push({
+				role   : 'user',
+				content: userMessage,
+			});
+		}
+
+		// For UI questions, proactively search the connected SPY repo for relevant labels/components.
+		let uiCodeSearchSection = '';
+		try {
+			const isUi = looksLikeUiQuestion(userMessage);
+			if (isUi) {
+				const githubConfigForUi = await githubService.getConfig();
+				if (githubConfigForUi) {
+					onProgress?.('Searching UI codebase...');
+					const keywords = extractSearchKeywords(userMessage, 4);
+					// Prefer user text; fallback to keyword query if needed.
+					const query = keywords.length > 0 ? keywords.join(' ') : userMessage;
+					const uiResults = await githubService.searchCode(query);
+					uiCodeSearchSection = formatUiCodeSearchResults(uiResults);
+					if (uiCodeSearchSection) {
+						onDebugLog?.('info', 'UI Grounding', `Found ${uiResults.length} code search results for: ${query}`);
+					} else {
+						onDebugLog?.('info', 'UI Grounding', `No code search results for: ${query}`);
+					}
+				}
+			}
+		} catch (error) {
+			onDebugLog?.('error', 'UI Grounding', 'UI code search failed', String(error));
+		}
 
 		onProgress?.('Searching knowledge base...');
 
@@ -337,6 +648,30 @@ export class ClaudeService {
 
 		onProgress?.('Sending message to Jørgen...');
 
+		// Check schema index availability (if DB is connected)
+		let schemaIndexInfo: { exists: boolean; generatedAtIso?: string; source?: string; tableCount?: number } | null = null;
+		if (databaseName && databaseIds.length > 0) {
+			try {
+				const configs = await databaseService.getConfigs();
+				const config  = configs.find((c) => c.id === databaseIds[0]);
+				if (config) {
+					const index = await schemaIndexService.loadIndex(config.id);
+					if (index) {
+						schemaIndexInfo = {
+							exists        : true,
+							generatedAtIso: index.generatedAtIso,
+							source        : index.source,
+							tableCount    : index.tables.length,
+						};
+					} else {
+						schemaIndexInfo = {exists: false};
+					}
+				}
+			} catch (error) {
+				// Non-fatal: schema index is an optimization only.
+				onDebugLog?.('error', 'Schema Index', 'Failed to check schema index status', String(error));
+			}
+		}
 
 		// Build system prompt
 		let systemPrompt = `You are a helpful assistant that answers questions accurately and clearly. ALWAYS respond in the same language as the user's question.
@@ -348,7 +683,30 @@ Before using any tools, use <thinking> tags to plan your approach:
 - Do I need to look at code files, or is this a data question?
 - What's the most efficient way to get the answer?
 
-Use your thinking to avoid unnecessary work - don't query the database if you can answer from context, and don't search code if you just need data.`;
+Use your thinking to avoid unnecessary work - don't query the database if you can answer from context, and don't search code if you just need data.
+
+CODE ANALYSIS RULE:
+When reading or analyzing code (from GitHub, database queries, or any source):
+- ALWAYS ignore all comments in the code
+- Only analyze the actual code implementation
+- Comments may be outdated, misleading, or incorrect
+- Base your understanding solely on what the code actually does, not what comments say it does`;
+
+		// Load working summary for this chat (if present)
+		let workingSummaryText = '';
+		try {
+			const chat = await chatService.getChat(chatId);
+			const ws   = (chat as any)?.workingSummary?.text ? String((chat as any).workingSummary.text) : '';
+			if (ws.trim() !== '') {
+				workingSummaryText = ws.trim();
+			}
+		} catch (error) {
+			onDebugLog?.('error', 'Working Summary', 'Failed to load working summary', String(error));
+		}
+
+		if (workingSummaryText) {
+			systemPrompt += `\n\nWORKING SUMMARY (CHAT MEMORY):\n${workingSummaryText}\n\nUse this as current chat context. If you discover a contradiction, prioritize tool output and update your internal understanding.`;
+		}
 
 		// Add relevant context from vector store
 		if (contextDocuments.length > 0) {
@@ -358,6 +716,11 @@ Use your thinking to avoid unnecessary work - don't query the database if you ca
 			});
 			systemPrompt += '\n\nUse this knowledge to help answer the user\'s question when relevant.';
 			onDebugLog?.('info', 'Vector Store', `Added ${contextDocuments.length} documents to system prompt`);
+		}
+
+		// Add UI code grounding context (if present)
+		if (uiCodeSearchSection) {
+			systemPrompt += `\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n${uiCodeSearchSection}\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
 		}
 
 		if (databaseName && databaseIds.length > 0) {
@@ -396,6 +759,11 @@ KEY ARCHITECTURE NOTES:
 - Collections are immutable - use withX() methods
 - Prepared statements with named parameters required for all queries
 
+LOCAL SCHEMA INDEX:
+${schemaIndexInfo?.exists
+				? `- Status: AVAILABLE\n- Generated: ${schemaIndexInfo.generatedAtIso}\n- Tables: ${schemaIndexInfo.tableCount}\n- Source: ${schemaIndexInfo.source}\n- IMPORTANT: Prefer schema-index tools (search_schema / get_table_schema_cached) for table/column discovery.`
+				: `- Status: NOT AVAILABLE\n- Recommendation: Ask the user to generate it in Settings → Database Connection → Database Schema Index.\n- Until then, use describe_table when you must verify columns.`}
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 DATABASE SECURITY & QUERY RULES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -423,8 +791,19 @@ IMPORTANT QUERY RULES:
    - brand: Brand information
    - season: Season definitions
 
-3. Always check table structure with describe_table before querying
-4. Use LIMIT when querying large tables to avoid timeouts
+3. Prefer the LOCAL schema index tools first:
+   - Use search_schema to discover the correct table/column names
+   - Use get_table_schema_cached to verify columns and keys
+   - If the index is missing, ask the user to generate it in Settings → Database Connection → Database Schema Index
+   - Only use describe_table when the local index is missing or looks outdated
+
+4. CRITICAL: ALWAYS use LIMIT in your queries to control output size
+   - Query results over 100 rows are AUTOMATICALLY TRUNCATED to prevent token limit errors
+   - If you need more than 100 rows, use LIMIT explicitly (e.g., LIMIT 500)
+   - For exploratory queries, use LIMIT 10 or LIMIT 20 to see sample data
+   - Large result sets can cause "prompt too long" errors (200,000 token limit)
+   - When results are truncated, you'll see a warning message with the original row count
+
 5. Join tables explicitly - avoid implicit joins
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -448,7 +827,13 @@ USER INTERFACE GUIDANCE
 
 When users ask "how do I..." or "hvordan..." questions about performing tasks in SPY:
 
-ALWAYS provide step-by-step UI instructions with specific button names and menu locations:
+ALWAYS provide step-by-step UI instructions with specific button names and menu locations.
+
+CRITICAL UI ACCURACY RULES:
+- NEVER guess UI labels, button names, menu names, or field names.
+- If an image/screenshot is provided, quote the exact labels you can see.
+- If no screenshot is provided, use code search results (if present) to ground exact labels.
+- If you still cannot ground the UI labels, ask ONE clarifying question (e.g. \"Which page are you on?\" or \"Please paste a screenshot\").
 
 **Good Example:**
 "For at oprette en ny style:
@@ -628,6 +1013,26 @@ OUTPUT RULES
 							onProgress?.(`Running query (${currentTool}/${toolCount}): ${shortQuery}`);
 							onDebugLog?.('query', 'Database Query', `Executing query on ${databaseName}`, query);
 
+							// Preflight against local schema index to prevent avoidable DB errors.
+							if (databaseName) {
+								const preflight = await preflightQueryAgainstSchemaIndex(config.id, query);
+								if (!preflight.ok) {
+									result = {
+										error         : preflight.error,
+										hints         : preflight.hints,
+										recommendation: 'Use search_schema and/or get_table_schema_cached to verify table/column names before running the query.',
+									};
+									onDebugLog?.('tool', 'Schema Index', 'Preflight blocked a likely-invalid query', JSON.stringify(result, null, 2));
+									toolResults.push({
+										type       : 'tool_result',
+										tool_use_id: content.id,
+										content    : JSON.stringify(result, null, 2),
+										is_error   : true,
+									});
+									continue;
+								}
+							}
+
 							result = await databaseService.executeQuery(
 								config.id,
 								query,
@@ -657,6 +1062,103 @@ OUTPUT RULES
 							onDebugLog?.('query', 'Database Schema', `Listing tables in ${databaseName}`, `SHOW TABLES`);
 							result = await databaseService.listTables(config.id, databaseName);
 							onDebugLog?.('query', 'Database Schema', `Found ${(result as string[]).length} tables`);
+						} else if (toolName.startsWith('search_schema_')) {
+							// Find which database this tool belongs to
+							const configs = await databaseService.getConfigs();
+							const config  = configs.find((c) => {
+								const dbName = c.name.toLowerCase().replace(/\s+/g, '_');
+								return toolName.includes(dbName);
+							});
+
+							if (!config) {
+								throw new Error(`Database config not found for tool: ${toolName}`);
+							}
+							if (!databaseName) {
+								throw new Error('Database name must be provided');
+							}
+
+							const query = String(toolInput.query ?? '');
+							const limit = typeof toolInput.limit === 'number' ? toolInput.limit : 10;
+							onProgress?.(`Searching schema index: ${query} (${currentTool}/${toolCount})`);
+							onDebugLog?.('tool', 'Schema Index', `Searching schema index for: ${query}`, `Tool: ${toolName}`);
+
+							const index = await schemaIndexService.loadIndex(config.id);
+							if (!index) {
+								result = {
+									exists : false,
+									message: 'No local schema index found. Generate it in Settings → Database Connection → Database Schema Index.',
+									databaseName,
+								};
+							} else {
+								result = {
+									exists        : true,
+									databaseName,
+									generatedAtIso: index.generatedAtIso,
+									source        : index.source,
+									matches       : schemaIndexService.searchSchema(index, query, limit),
+								};
+							}
+						} else if (toolName.startsWith('get_table_schema_cached_')) {
+							// Find which database this tool belongs to
+							const configs = await databaseService.getConfigs();
+							const config  = configs.find((c) => {
+								const dbName = c.name.toLowerCase().replace(/\s+/g, '_');
+								return toolName.includes(dbName);
+							});
+
+							if (!config) {
+								throw new Error(`Database config not found for tool: ${toolName}`);
+							}
+							if (!databaseName) {
+								throw new Error('Database name must be provided');
+							}
+
+							const tableName = String(toolInput.table_name ?? '');
+							onProgress?.(`Reading schema index: ${tableName} (${currentTool}/${toolCount})`);
+							onDebugLog?.('tool', 'Schema Index', `Reading cached schema for: ${tableName}`, `Tool: ${toolName}`);
+
+							const index = await schemaIndexService.loadIndex(config.id);
+							if (!index) {
+								result = {
+									exists : false,
+									message: 'No local schema index found. Generate it in Settings → Database Connection → Database Schema Index.',
+									databaseName,
+								};
+							} else {
+								const table = schemaIndexService.getTable(index, tableName);
+								if (!table) {
+									result = {
+										exists        : true,
+										found         : false,
+										databaseName,
+										generatedAtIso: index.generatedAtIso,
+										message       : `Table not found in local schema index: ${tableName}`,
+									};
+								} else {
+									const maxColumns = 200;
+									const columns    = table.columns.slice(0, maxColumns).map((c) => ({
+										columnName     : c.columnName,
+										dataType       : c.dataType,
+										columnType     : c.columnType,
+										ordinalPosition: c.ordinalPosition,
+										isNullable     : c.isNullable,
+									}));
+									result           = {
+										exists        : true,
+										found         : true,
+										databaseName,
+										generatedAtIso: index.generatedAtIso,
+										source        : index.source,
+										table         : {
+											tableName       : table.tableName,
+											primaryKey      : table.primaryKey,
+											foreignKeys     : table.foreignKeys,
+											columns,
+											columnsTruncated: table.columns.length > maxColumns,
+										},
+									};
+								}
+							}
 						} else if (toolName.startsWith('describe_table_')) {
 							// Find which database this tool belongs to
 							const configs = await databaseService.getConfigs();
@@ -680,14 +1182,105 @@ OUTPUT RULES
 							onDebugLog?.('query', 'Database Schema', `Table schema retrieved for ${tableName}`);
 						}
 
+						// Truncate large query results to prevent token limit errors
+						const { truncated, data: processedResult } = this.truncateLargeToolResult(result);
+						if (truncated) {
+							onDebugLog?.('info', 'Query Truncation', `Large query result truncated to prevent token limit errors`);
+						}
+
 						toolResults.push({
 							type       : 'tool_result',
 							tool_use_id: content.id,
-							content    : JSON.stringify(result, null, 2),
+							content    : JSON.stringify(processedResult, null, 2),
 						});
 					} catch (error) {
 						const errorMessage = error instanceof Error ? error.message : 'Unknown error';
 						onDebugLog?.('error', 'Tool Error', `Error in ${toolName}: ${errorMessage}`, JSON.stringify(toolInput, null, 2));
+
+						// Schema-aware hints for common SQL failures (reduces trial-and-error).
+						// Uses the local schema index when available to avoid extra DB calls.
+						if (toolName.startsWith('query_') && databaseName) {
+							try {
+								const configs = await databaseService.getConfigs();
+								const config  = configs.find((c) => {
+									const dbName = c.name.toLowerCase().replace(/\s+/g, '_');
+									return toolName.includes(dbName);
+								});
+
+								if (config) {
+									const hintPayload: any = {error: errorMessage};
+									const index            = await schemaIndexService.loadIndex(config.id);
+									if (index) {
+										hintPayload.schemaIndex = {
+											available     : true,
+											generatedAtIso: index.generatedAtIso,
+											source        : index.source,
+										};
+
+										const unknownColumnMatch = errorMessage.match(/Unknown column ['`"]([^'`"]+)['`"]/i);
+										if (unknownColumnMatch) {
+											const columnNeedle                                                  = unknownColumnMatch[1];
+											const needleLower                                                   = columnNeedle.toLowerCase();
+											const suggestions: Array<{ tableName: string; columnName: string }> = [];
+											for (const t of index.tables) {
+												for (const c of t.columns) {
+													if (c.columnName.toLowerCase().includes(needleLower)) {
+														suggestions.push({tableName: t.tableName, columnName: c.columnName});
+														if (suggestions.length >= 25) {
+															break;
+														}
+													}
+												}
+												if (suggestions.length >= 25) {
+													break;
+												}
+											}
+											hintPayload.hints               = hintPayload.hints || {};
+											hintPayload.hints.unknownColumn = {
+												requested: columnNeedle,
+												suggestions,
+											};
+										}
+
+										const tableDoesNotExistMatch = errorMessage.match(/Table ['`"]([^'`"]+)['`"] doesn't exist/i);
+										if (tableDoesNotExistMatch) {
+											const fullTableRef             = tableDoesNotExistMatch[1];
+											const tableNeedle              = fullTableRef.includes('.') ? fullTableRef.split('.').pop()! : fullTableRef;
+											hintPayload.hints              = hintPayload.hints || {};
+											hintPayload.hints.unknownTable = {
+												requested  : fullTableRef,
+												suggestions: schemaIndexService.searchSchema(index, tableNeedle, 15),
+											};
+										}
+
+										const ambiguousColumnMatch = errorMessage.match(/Column ['`"]([^'`"]+)['`"] in field list is ambiguous/i);
+										if (ambiguousColumnMatch) {
+											const col                         = ambiguousColumnMatch[1];
+											hintPayload.hints                 = hintPayload.hints || {};
+											hintPayload.hints.ambiguousColumn = {
+												requested     : col,
+												recommendation: 'Qualify the column with a table alias (e.g. t.column) or rename the selected column alias.',
+												suggestions   : schemaIndexService.searchSchema(index, col, 10),
+											};
+										}
+									} else {
+										hintPayload.schemaIndex    = {available: false};
+										hintPayload.recommendation = 'Generate the local schema index in Settings → Database Connection → Database Schema Index to get better hints and fewer schema queries.';
+									}
+
+									toolResults.push({
+										type       : 'tool_result',
+										tool_use_id: content.id,
+										content    : JSON.stringify(hintPayload, null, 2),
+										is_error   : true,
+									});
+									continue;
+								}
+							} catch (hintError) {
+								onDebugLog?.('error', 'Tool Error', `Failed to generate schema hints for ${toolName}`, String(hintError));
+							}
+						}
+
 						toolResults.push({
 							type       : 'tool_result',
 							tool_use_id: content.id,
@@ -800,17 +1393,19 @@ OUTPUT RULES
 			content: userMessage,
 		});
 
-		// Add Claude's technical response (extract text only, no tool_use blocks)
-		const technicalAnswer = response.content
+		// Add Claude's technical response (extract text only, no tool_use blocks).
+		// We will return this to the UI as the "detailed" answer.
+		let detailedAnswer = response.content
 			.filter((c) => c.type === 'text')
 			.map((c) => c.text)
-			.join('\n');
+			.join('\n')
+			.trim();
 
 		// Only add the technical answer if it's not empty
-		if (technicalAnswer.trim()) {
+		if (detailedAnswer) {
 			simplificationMessages.push({
 				role   : 'assistant',
-				content: technicalAnswer,
+				content: detailedAnswer,
 			});
 		} else {
 			// If Claude didn't provide a text response (only used tools), ask for an answer first
@@ -833,6 +1428,9 @@ OUTPUT RULES
 				.map((c) => c.text)
 				.join('\n');
 
+			// Use this as the detailed answer when Claude produced only tool blocks before.
+			detailedAnswer = answer.trim();
+
 			simplificationMessages.push({
 				role   : 'assistant',
 				content: answer,
@@ -846,10 +1444,15 @@ OUTPUT RULES
 
 CRITICAL: Answer in the SAME LANGUAGE as the original question. If the question was in Danish, answer in Danish. If it was in English, answer in English.
 
+OUTPUT LENGTH (VERY IMPORTANT):
+- Default to a SHORT answer: maximum 3-4 lines total.
+- If the user explicitly asks for details (steps, lists, deep explanation, code/SQL), you may go longer.
+- If you cannot answer correctly in 3-4 lines, ask ONE clarifying question instead of writing a long answer.
+
 Guidelines:
 - Start with clear business language (customer, order, discount, price, invoice, delivery, etc.)
-- Explain WHAT happens and WHY it matters
-- Avoid unnecessary technical jargon that doesn't help understanding
+- Explain WHAT happens and WHY it matters, in as few words as possible
+- Avoid unnecessary technical jargon
 - BUT: If they ask for technical details (file names, class names, code locations, etc.), provide them directly
 - If they ask "what file", "what class", "where in the code" - answer specifically with file paths and names
 - Don't hide technical information when directly requested - support staff are capable of handling it
@@ -861,39 +1464,45 @@ Balance: Be clear and accessible, but not dumbed down. Respect that support staf
 		// Get the simplified response (no tools needed here, CSV already created)
 		const simplifiedResponse = await client.messages.create({
 			model     : 'claude-sonnet-4-5-20250929',
-			max_tokens: 4096,
+			max_tokens: 600,
 			messages  : simplificationMessages,
 		});
 
 		onProgress?.('Finalizing answer...');
 
-		// Extract and return the simplified answer
-		return simplifiedResponse.content
+		// Extract simplified answer (we will also update working summary).
+		const simplifiedText = simplifiedResponse.content
 			.filter((c) => c.type === 'text')
 			.map((c) => c.text)
 			.join('\n');
-	}
 
-	async generateTldr(messageContent: string): Promise<string> {
-		const client = await this.ensureClient();
+		// Update working summary in the background (best-effort).
+		try {
+			const updatePrompt = `You are maintaining a short "working summary" for an ongoing support chat.\n\nUpdate the existing summary using the latest user message and the assistant answer.\n\nRequirements:\n- Output plain text only (no JSON)\n- Max 12 bullet points total\n- Keep it factual and useful for future questions\n- Split into sections with short headers:\n  - Confirmed\n  - Assumptions\n  - Open questions\n- If a point is no longer true, remove it\n- If there is no existing summary, start a new one\n\nExisting summary:\n${workingSummaryText || '(none)'}\n\nLatest user message:\n${userMessage}\n\nAssistant answer:\n${simplifiedText}`;
 
-		const response = await client.messages.create({
-			model     : 'claude-sonnet-4-5-20250929',
-			max_tokens: 1024,
-			messages  : [
-				{
-					role   : 'user',
-					content: `Please provide a very short TL;DR (Too Long; Didn't Read) summary of this answer in 2-3 sentences maximum. Keep it in the SAME LANGUAGE as the original text. Focus on the key points only.
+			const summaryResponse = await client.messages.create({
+				model     : 'claude-3-5-haiku-20241022',
+				max_tokens: 512,
+				messages  : [{role: 'user', content: updatePrompt}],
+			});
 
-Original answer:
-${messageContent}`,
-				},
-			],
-		});
+			const summaryText = summaryResponse.content
+				.filter((c) => c.type === 'text')
+				.map((c) => c.text)
+				.join('\n')
+				.trim();
 
-		return response.content
-			.filter((c) => c.type === 'text')
-			.map((c) => c.text)
-			.join('\n');
+			if (summaryText) {
+				await chatService.setWorkingSummary(chatId, summaryText);
+				onDebugLog?.('info', 'Working Summary', 'Updated working summary', summaryText);
+			}
+		} catch (error) {
+			onDebugLog?.('error', 'Working Summary', 'Failed to update working summary', String(error));
+		}
+
+		return {
+			shortAnswer   : simplifiedText,
+			detailedAnswer,
+		};
 	}
 }

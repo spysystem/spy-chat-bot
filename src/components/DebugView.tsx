@@ -1,5 +1,6 @@
 import type {JSX} from 'react';
 import {useEffect, useState} from 'react';
+import type {Chat} from '../types';
 import './DebugView.css';
 
 interface DebugLog {
@@ -11,10 +12,15 @@ interface DebugLog {
 }
 
 export function DebugView(): JSX.Element {
-	const [logs, setLogs]             = useState<DebugLog[]>([]);
-	const [filter, setFilter]         = useState('');
-	const [typeFilter, setTypeFilter] = useState<string>('all');
-	const [autoScroll, setAutoScroll] = useState(true);
+	const [logs, setLogs]                                       = useState<DebugLog[]>([]);
+	const [filter, setFilter]                                   = useState('');
+	const [typeFilter, setTypeFilter]                           = useState<string>('all');
+	const [autoScroll, setAutoScroll]                           = useState(true);
+	const [chats, setChats]                                     = useState<Chat[]>([]);
+	const [selectedChatId, setSelectedChatId]                   = useState<string>('');
+	const [workingSummary, setWorkingSummary]                   = useState<string>('');
+	const [workingSummaryUpdatedAt, setWorkingSummaryUpdatedAt] = useState<string>('');
+	const [workingSummaryError, setWorkingSummaryError]         = useState<string>('');
 
 	useEffect(() => {
 		// Listen for debug logs
@@ -28,6 +34,20 @@ export function DebugView(): JSX.Element {
 	}, []);
 
 	useEffect(() => {
+		loadChats();
+	}, []);
+
+	useEffect(() => {
+		if (!selectedChatId) {
+			setWorkingSummary('');
+			setWorkingSummaryUpdatedAt('');
+			setWorkingSummaryError('');
+			return;
+		}
+		refreshWorkingSummary(selectedChatId);
+	}, [selectedChatId]);
+
+	useEffect(() => {
 		if (autoScroll) {
 			const logsContainer = document.querySelector('.debug-logs');
 			if (logsContainer) {
@@ -35,6 +55,40 @@ export function DebugView(): JSX.Element {
 			}
 		}
 	}, [logs, autoScroll]);
+
+	async function loadChats(): Promise<void> {
+		try {
+			const allChats = await window.electronAPI.getChats();
+			setChats(allChats);
+			if (!selectedChatId && allChats.length > 0) {
+				setSelectedChatId(allChats[0].id);
+			}
+		} catch (error) {
+			// Non-fatal
+		}
+	}
+
+	async function refreshWorkingSummary(chatId: string): Promise<void> {
+		setWorkingSummaryError('');
+		try {
+			const chat = await window.electronAPI.getChat(chatId);
+			const text = chat?.workingSummary?.text || '';
+			setWorkingSummary(text);
+			setWorkingSummaryUpdatedAt(chat?.workingSummary?.updatedAt || '');
+		} catch (error) {
+			setWorkingSummaryError(error instanceof Error ? error.message : String(error));
+		}
+	}
+
+	async function clearWorkingSummary(chatId: string): Promise<void> {
+		setWorkingSummaryError('');
+		try {
+			await window.electronAPI.clearWorkingSummary(chatId);
+			await refreshWorkingSummary(chatId);
+		} catch (error) {
+			setWorkingSummaryError(error instanceof Error ? error.message : String(error));
+		}
+	}
 
 	function clearLogs(): void {
 		setLogs([]);
@@ -105,6 +159,45 @@ export function DebugView(): JSX.Element {
 			<div className="debug-header">
 				<h2>Debug Console</h2>
 				<div className="debug-controls">
+					<select
+						className="debug-type-filter"
+						value={selectedChatId}
+						onChange={(event) => setSelectedChatId(event.target.value)}
+						title="Select chat for Working Summary"
+					>
+						{chats.length === 0 && (
+							<option value="">No chats</option>
+						)}
+						{chats.map((chat) => (
+							<option key={chat.id} value={chat.id}>
+								{chat.title}
+							</option>
+						))}
+					</select>
+					<button
+						className="debug-button"
+						onClick={async () => {
+							await loadChats();
+							if (selectedChatId) {
+								await refreshWorkingSummary(selectedChatId);
+							}
+						}}
+						title="Refresh chats and summary"
+					>
+						Refresh
+					</button>
+					<button
+						className="debug-button"
+						onClick={async () => {
+							if (selectedChatId) {
+								await clearWorkingSummary(selectedChatId);
+							}
+						}}
+						disabled={!selectedChatId}
+						title="Clear working summary for selected chat"
+					>
+						Clear Summary
+					</button>
 					<input
 						type="text"
 						className="debug-filter"
@@ -139,6 +232,23 @@ export function DebugView(): JSX.Element {
 						Export
 					</button>
 				</div>
+			</div>
+
+			<div className="debug-working-summary">
+				<div className="debug-working-summary-header">
+					<div className="debug-working-summary-title">Working Summary (Chat Memory)</div>
+					{workingSummaryUpdatedAt && (
+						<div className="debug-working-summary-meta">
+							Updated: {new Date(workingSummaryUpdatedAt).toLocaleString()}
+						</div>
+					)}
+				</div>
+				{workingSummaryError && (
+					<div className="debug-working-summary-error">⚠ {workingSummaryError}</div>
+				)}
+				<pre className="debug-working-summary-content">
+					{workingSummary?.trim() ? workingSummary : '(empty)'}
+				</pre>
 			</div>
 
 			<div className="debug-stats">

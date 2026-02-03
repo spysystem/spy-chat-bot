@@ -4,7 +4,9 @@ import * as path from 'path';
 import type {ChatMessage} from './services/chat-service';
 import {ChatService} from './services/chat-service';
 import {ClaudeService} from './services/claude-service';
+import {AttachmentService} from './services/attachment-service';
 import {DatabaseService} from './services/database-service';
+import {SchemaIndexService} from './services/schema-index-service';
 import type {GitHubConfig} from './services/github-service';
 import {GitHubService} from './services/github-service';
 import {SecureStorageService} from './services/secure-storage-service';
@@ -16,12 +18,14 @@ let debugWindow: BrowserWindow | null = null;
 let pendingDeepLink: string | null    = null;
 
 // Initialize services with secure storage
-const secureStorage   = new SecureStorageService();
-const claudeService   = new ClaudeService(secureStorage);
-const databaseService = new DatabaseService(secureStorage);
-const chatService     = new ChatService();
-const githubService   = new GitHubService(secureStorage);
-const settingsService = new SettingsService();
+const secureStorage      = new SecureStorageService();
+const claudeService      = new ClaudeService(secureStorage);
+const databaseService    = new DatabaseService(secureStorage);
+const schemaIndexService = new SchemaIndexService();
+const attachmentService  = new AttachmentService(10 * 1024 * 1024);
+const chatService        = new ChatService();
+const githubService      = new GitHubService(secureStorage);
+const settingsService    = new SettingsService();
 
 // Configure auto-updater
 autoUpdater.autoDownload         = true;
@@ -210,10 +214,49 @@ ipcMain.handle('delete-database-config', async (_event, id: string) => {
 	return await databaseService.deleteConfig(id);
 });
 
-ipcMain.handle('send-message', async (event, message: string, databases: string[], history?: Array<{
+// Schema index
+ipcMain.handle('get-schema-index-status', async (_event, configId: string) => {
+	return await schemaIndexService.getStatus(configId);
+});
+
+ipcMain.handle('generate-schema-index', async (event, configId: string, databaseName: string) => {
+	const onProgress = (progress: { stage: string; done: number; total: number }) => {
+		event.sender.send('schema-index-progress', progress);
+	};
+
+	try {
+		const status = await schemaIndexService.generateIndex(
+			configId,
+			databaseName,
+			databaseService,
+			onProgress,
+		);
+		event.sender.send('schema-index-complete', status);
+		return status;
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		event.sender.send('schema-index-error', message);
+		throw error;
+	}
+});
+
+// Attachments
+ipcMain.handle('save-attachment', async (_event, chatId: string, originalName: string, mimeType: string | undefined, dataBase64: string) => {
+	return await attachmentService.saveAttachment(chatId, originalName, mimeType, dataBase64);
+});
+
+ipcMain.handle('get-attachment-data-url', async (_event, storedPath: string, mimeType: string) => {
+	return await attachmentService.getImageDataUrl(storedPath, mimeType);
+});
+
+ipcMain.handle('open-attachment', async (_event, storedPath: string) => {
+	return await attachmentService.openAttachment(storedPath);
+});
+
+ipcMain.handle('send-message', async (event, chatId: string, message: string, databases: string[], history?: Array<{
 	role: string;
 	content: string
-}>, databaseName?: string) => {
+}>, databaseName?: string, attachments?: any[]) => {
 	const onProgress = (status: string) => {
 		event.sender.send('message-progress', status);
 	};
@@ -222,7 +265,7 @@ ipcMain.handle('send-message', async (event, message: string, databases: string[
 		sendDebugLog(type, category, message, details);
 	};
 
-	return await claudeService.sendMessage(message, databases, databaseService, githubService, onProgress, history, databaseName, onDebugLog);
+	return await claudeService.sendMessage(chatId, message, databases, databaseService, githubService, schemaIndexService, chatService, attachmentService, onProgress, history, databaseName, attachments, onDebugLog);
 });
 
 ipcMain.handle('get-api-key', async () => {
@@ -236,10 +279,6 @@ ipcMain.handle('save-api-key', async (_event, apiKey: string) => {
 		console.error('[Main] Error saving API key:', error);
 		throw error;
 	}
-});
-
-ipcMain.handle('generate-tldr', async (_event, messageContent: string) => {
-	return await claudeService.generateTldr(messageContent);
 });
 
 // Chat management
@@ -263,6 +302,14 @@ ipcMain.handle('delete-chat', async (_event, chatId: string) => {
 	return await chatService.deleteChat(chatId);
 });
 
+ipcMain.handle('set-working-summary', async (_event, chatId: string, text: string) => {
+	return await chatService.setWorkingSummary(chatId, text);
+});
+
+ipcMain.handle('clear-working-summary', async (_event, chatId: string) => {
+	return await chatService.clearWorkingSummary(chatId);
+});
+
 // GitHub configuration
 ipcMain.handle('get-github-config', async () => {
 	return await githubService.getConfig();
@@ -283,14 +330,6 @@ ipcMain.handle('get-user-name', async () => {
 
 ipcMain.handle('save-user-name', async (_event, userName: string) => {
 	return await settingsService.saveUserName(userName);
-});
-
-ipcMain.handle('get-auto-tldr', async () => {
-	return await settingsService.getAutoTldr();
-});
-
-ipcMain.handle('save-auto-tldr', async (_event, autoTldr: boolean) => {
-	return await settingsService.saveAutoTldr(autoTldr);
 });
 
 // Debug window

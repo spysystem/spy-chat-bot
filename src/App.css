@@ -1,12 +1,3 @@
-@font-face {
-	font-family: "Neuropol X";
-	src: url("./assets/fonts/neuropol_x.ttf") format("truetype"),
-	url("./assets/fonts/neuropol-x.woff2") format("woff2"),
-	url("./assets/fonts/neuropol-x.woff") format("woff");
-	font-weight: normal;
-	font-style: normal;
-}
-
 * {
 	margin: 0;
 	padding: 0;
@@ -54,7 +45,7 @@
 }
 
 body {
-	font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", "Oxygen", "Ubuntu", "Cantarell", "Fira Sans", "Droid Sans", "Helvetica Neue", sans-serif;
+	font-family: "Poppins", -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", "Oxygen", "Ubuntu", "Cantarell", "Fira Sans", "Droid Sans", "Helvetica Neue", sans-serif;
 	-webkit-font-smoothing: antialiased;
 	-moz-osx-font-smoothing: grayscale;
 	background: var(--bg-primary);

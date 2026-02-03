@@ -1,18 +1,21 @@
 import {Fragment, useState, useEffect, JSX} from 'react';
-import type {DatabaseConfig, GitHubConfig} from '../types';
+import type {DatabaseConfig, GitHubConfig, SchemaIndexProgress, SchemaIndexStatus} from '../types';
 import './SettingsView.css';
 
 export function SettingsView(): JSX.Element {
 	const [connection, setConnection]             = useState<DatabaseConfig | null>(null);
 	const [isEditing, setIsEditing]               = useState<boolean>(false);
 	const [testResult, setTestResult]             = useState<{ success: boolean; error?: string } | null>(null);
+	const [schemaIndexDatabaseName, setSchemaIndexDatabaseName] = useState<string>('');
+	const [schemaIndexStatus, setSchemaIndexStatus] = useState<SchemaIndexStatus | null>(null);
+	const [schemaIndexProgress, setSchemaIndexProgress] = useState<SchemaIndexProgress | null>(null);
+	const [schemaIndexError, setSchemaIndexError] = useState<string>('');
+	const [isGeneratingSchemaIndex, setIsGeneratingSchemaIndex] = useState<boolean>(false);
 	const [apiKey, setApiKey]                     = useState('');
 	const [apiKeyStatus, setApiKeyStatus]         = useState<'loading' | 'saved' | 'error' | 'none'>('loading');
 	const [apiKeyError, setApiKeyError]           = useState<string>('');
 	const [userName, setUserName]                 = useState('');
 	const [userNameStatus, setUserNameStatus]     = useState<'loading' | 'saved' | 'error' | 'none'>('loading');
-	const [autoTldr, setAutoTldr]                 = useState(false);
-	const [autoTldrStatus, setAutoTldrStatus]     = useState<'loading' | 'saved' | 'error' | 'none'>('loading');
 	const [githubConfig, setGithubConfig]         = useState<GitHubConfig>({
 		token : '',
 		owner : '',
@@ -33,11 +36,32 @@ export function SettingsView(): JSX.Element {
 		loadConnection();
 		loadApiKey();
 		loadUserName();
-		loadAutoTldr();
 		loadGitHubConfig();
 		loadAppVersion();
 
 		// Setup update event listeners
+		const unsubscribeSchemaProgress = window.electronAPI.onSchemaIndexProgress((progress) => {
+			setSchemaIndexProgress(progress);
+		});
+		const unsubscribeSchemaComplete = window.electronAPI.onSchemaIndexComplete((status) => {
+			setSchemaIndexStatus(status);
+			setIsGeneratingSchemaIndex(false);
+			// Keep progress visible briefly so users can see completion.
+			setSchemaIndexProgress((prev) => {
+				if (!prev) {
+					return {stage: 'Completed', done: 1, total: 1};
+				}
+				return {stage: 'Completed', done: prev.total, total: prev.total};
+			});
+			setTimeout(() => {
+				setSchemaIndexProgress(null);
+			}, 1500);
+		});
+		const unsubscribeSchemaError = window.electronAPI.onSchemaIndexError((error) => {
+			setSchemaIndexError(error);
+			setIsGeneratingSchemaIndex(false);
+		});
+
 		const unsubscribeUpdateAvailable = window.electronAPI.onUpdateAvailable((info) => {
 			setUpdateStatus('available');
 			setUpdateInfo({version: info.version});
@@ -60,6 +84,9 @@ export function SettingsView(): JSX.Element {
 
 		// Cleanup listeners on unmount
 		return () => {
+			unsubscribeSchemaProgress();
+			unsubscribeSchemaComplete();
+			unsubscribeSchemaError();
 			unsubscribeUpdateAvailable();
 			unsubscribeDownloadProgress();
 			unsubscribeUpdateDownloaded();
@@ -74,6 +101,45 @@ export function SettingsView(): JSX.Element {
 			setConnection(configs[0]);
 		} else {
 			setConnection(null);
+		}
+	}
+
+	async function refreshSchemaIndexStatus(): Promise<void> {
+		setSchemaIndexError('');
+		setSchemaIndexStatus(null);
+		if (!connection) {
+			return;
+		}
+		try {
+			const status = await window.electronAPI.getSchemaIndexStatus(connection.id);
+			setSchemaIndexStatus(status);
+		} catch (error) {
+			setSchemaIndexError(error instanceof Error ? error.message : String(error));
+		}
+	}
+
+	async function generateSchemaIndex(): Promise<void> {
+		setSchemaIndexError('');
+		setSchemaIndexProgress({stage: 'Starting...', done: 0, total: 1});
+
+		if (!connection) {
+			setSchemaIndexError('No database connection configured.');
+			return;
+		}
+		const dbName = schemaIndexDatabaseName.trim();
+		if (!dbName) {
+			setSchemaIndexError('Please enter a database name to index.');
+			return;
+		}
+
+		setIsGeneratingSchemaIndex(true);
+		try {
+			const status = await window.electronAPI.generateSchemaIndex(connection.id, dbName);
+			setSchemaIndexStatus(status);
+		} catch (error) {
+			setSchemaIndexError(error instanceof Error ? error.message : String(error));
+		} finally {
+			setIsGeneratingSchemaIndex(false);
 		}
 	}
 
@@ -105,30 +171,6 @@ export function SettingsView(): JSX.Element {
 		} catch (error) {
 			console.error('Error loading user name:', error);
 			setUserNameStatus('error');
-		}
-	}
-
-	async function loadAutoTldr(): Promise<void> {
-		try {
-			const enabled = await window.electronAPI.getAutoTldr();
-			setAutoTldr(enabled);
-			setAutoTldrStatus('saved');
-		} catch (error) {
-			console.error('Error loading auto TL;DR:', error);
-			setAutoTldrStatus('error');
-		}
-	}
-
-	async function saveAutoTldrFunction(): Promise<void> {
-		try {
-			await window.electronAPI.saveAutoTldr(autoTldr);
-			setAutoTldrStatus('saved');
-			setTimeout(() => {
-				setAutoTldrStatus('none');
-			}, 2000);
-		} catch (error) {
-			console.error('Error saving auto TL;DR:', error);
-			setAutoTldrStatus('error');
 		}
 	}
 
@@ -309,34 +351,6 @@ export function SettingsView(): JSX.Element {
 				</div>
 				<p className="help-text">
 					This name will be displayed in your chat messages instead of "You"
-				</p>
-				<div className="form-group">
-					<label htmlFor="auto-tldr">Auto TL;DR</label>
-					<div className="checkbox-wrapper">
-						<input
-							id="auto-tldr"
-							type="checkbox"
-							checked={autoTldr}
-							onChange={(event) => {
-								setAutoTldr(event.target.checked);
-								setAutoTldrStatus('none');
-							}}
-						/>
-						<span className="checkbox-description">Always show TL;DR version by default</span>
-					</div>
-					<button onClick={saveAutoTldrFunction}>
-						Save Auto TL;DR
-					</button>
-					{autoTldrStatus === 'saved' && (
-						<span className="status success">✓ Saved</span>
-					)}
-					{autoTldrStatus === 'error' && (
-						<span className="status error">⚠ Error saving</span>
-					)}
-				</div>
-				<p className="help-text">
-					When enabled, assistant responses will automatically be shown as short summaries (TL;DR). You can still toggle to see full
-					answers.
 				</p>
 			</section>
 
@@ -649,6 +663,81 @@ export function SettingsView(): JSX.Element {
 								Save
 							</button>
 						</div>
+					</div>
+				)}
+
+				{connection && !isEditing && (
+					<div className="schema-index-panel">
+						<h3>Database Schema Index (Recommended)</h3>
+						<p className="help-text">
+							Generate a local schema index (tables, columns, keys) for a specific database name.
+							This helps Jørgen find the correct tables/columns with fewer tokens and fewer schema queries.
+						</p>
+
+						<div className="form-group">
+							<label htmlFor="schema-index-database-name">Database name to index</label>
+							<input
+								id="schema-index-database-name"
+								type="text"
+								value={schemaIndexDatabaseName}
+								onChange={(event) => {
+									setSchemaIndexDatabaseName(event.target.value);
+									setSchemaIndexStatus(null);
+									setSchemaIndexError('');
+								}}
+								onBlur={refreshSchemaIndexStatus}
+								placeholder="e.g. spy_live (sample DB)"
+							/>
+							<p className="help-text">
+								This is only used to generate the schema snapshot. The resulting schema index is shared across all databases on this connection.
+								Allowed characters: letters, numbers, underscore.
+							</p>
+						</div>
+
+						<div className="form-group schema-index-actions">
+							<button
+								onClick={generateSchemaIndex}
+								disabled={isGeneratingSchemaIndex || !schemaIndexDatabaseName.trim()}
+							>
+								{isGeneratingSchemaIndex ? 'Generating…' : 'Generate Schema Index'}
+							</button>
+							{schemaIndexStatus?.exists && schemaIndexStatus.generatedAtIso && (
+								<span className="status success">
+									✓ Indexed {schemaIndexStatus.tableCount ?? 0} tables ({schemaIndexStatus.source})
+								</span>
+							)}
+						</div>
+
+						{schemaIndexProgress && (
+							<div className="schema-index-progress">
+								<div className="schema-index-progress-row">
+									<div className="schema-index-progress-stage">{schemaIndexProgress.stage}</div>
+									<div className="schema-index-progress-count">
+										{schemaIndexProgress.total > 1 ? `${schemaIndexProgress.done}/${schemaIndexProgress.total}` : ''}
+									</div>
+								</div>
+								<progress
+									value={schemaIndexProgress.total > 0 ? schemaIndexProgress.done : 0}
+									max={schemaIndexProgress.total > 0 ? schemaIndexProgress.total : 1}
+								/>
+							</div>
+						)}
+
+						{schemaIndexError && (
+							<div className="schema-index-error">
+								⚠ {schemaIndexError}
+							</div>
+						)}
+
+						{schemaIndexStatus && schemaIndexDatabaseName.trim() && (
+							<div className="schema-index-status">
+								<div><strong>Status:</strong> {schemaIndexStatus.exists ? 'Available' : 'Not generated yet'}</div>
+								<div><strong>Path:</strong> {schemaIndexStatus.filePath}</div>
+								{schemaIndexStatus.generatedAtIso && (
+									<div><strong>Generated:</strong> {new Date(schemaIndexStatus.generatedAtIso).toLocaleString()}</div>
+								)}
+							</div>
+						)}
 					</div>
 				)}
 			</section>

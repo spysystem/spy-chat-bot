@@ -249,15 +249,35 @@ export class DatabaseService {
 			}
 
 			// LAYER 2: Block ALL write keywords (comprehensive list)
-			const forbiddenKeywords = [
-				'INSERT', 'UPDATE', 'DELETE', 'DROP', 'CREATE', 'ALTER', 'TRUNCATE', 'REPLACE',
-				'RENAME', 'GRANT', 'REVOKE', 'LOCK', 'UNLOCK', 'CALL', 'EXECUTE', 'LOAD',
-				'INTO OUTFILE', 'INTO DUMPFILE', 'LOAD DATA', 'LOAD XML',
+			// IMPORTANT: Use keyword-aware matching to avoid false positives on column names like `updated_at`.
+			const forbiddenPatterns: Array<{ label: string; pattern: RegExp }> = [
+				// Single-keyword writes/DDL
+				{label: 'INSERT', pattern: /\bINSERT\b/i},
+				{label: 'UPDATE', pattern: /\bUPDATE\b/i},
+				{label: 'DELETE', pattern: /\bDELETE\b/i},
+				{label: 'DROP', pattern: /\bDROP\b/i},
+				{label: 'CREATE', pattern: /\bCREATE\b/i},
+				{label: 'ALTER', pattern: /\bALTER\b/i},
+				{label: 'TRUNCATE', pattern: /\bTRUNCATE\b/i},
+				{label: 'REPLACE', pattern: /\bREPLACE\b/i},
+				{label: 'RENAME', pattern: /\bRENAME\b/i},
+				{label: 'GRANT', pattern: /\bGRANT\b/i},
+				{label: 'REVOKE', pattern: /\bREVOKE\b/i},
+				{label: 'LOCK', pattern: /\bLOCK\b/i},
+				{label: 'UNLOCK', pattern: /\bUNLOCK\b/i},
+				{label: 'CALL', pattern: /\bCALL\b/i},
+				{label: 'EXECUTE', pattern: /\bEXECUTE\b/i},
+
+				// File/loader related (data exfiltration / writes)
+				{label: 'INTO OUTFILE', pattern: /\bINTO\s+OUTFILE\b/i},
+				{label: 'INTO DUMPFILE', pattern: /\bINTO\s+DUMPFILE\b/i},
+				{label: 'LOAD DATA', pattern: /\bLOAD\s+DATA\b/i},
+				{label: 'LOAD XML', pattern: /\bLOAD\s+XML\b/i},
 			];
 
-			for (const keyword of forbiddenKeywords) {
-				if (normalizedQuery.includes(keyword)) {
-					const error = `SECURITY VIOLATION: Query contains forbidden keyword: ${keyword}. Write operations are NEVER permitted.`;
+			for (const {label, pattern} of forbiddenPatterns) {
+				if (pattern.test(query)) {
+					const error = `SECURITY VIOLATION: Query contains forbidden keyword: ${label}. Write operations are NEVER permitted.`;
 					await this.logQuery(query, databaseName, configId, false, error);
 					throw new Error(error);
 				}

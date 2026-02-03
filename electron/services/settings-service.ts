@@ -5,7 +5,6 @@ import * as path from 'path';
 export interface UserSettings
 {
 	userName?: string;
-	autoTldr?: boolean;
 }
 
 export class SettingsService
@@ -67,16 +66,4 @@ export class SettingsService
 		await this.saveSettings(settings);
 	}
 
-	async getAutoTldr(): Promise<boolean>
-	{
-		const settings = await this.getSettings();
-		return settings.autoTldr || false;
-	}
-
-	async saveAutoTldr(autoTldr: boolean): Promise<void>
-	{
-		const settings = await this.getSettings();
-		settings.autoTldr = autoTldr;
-		await this.saveSettings(settings);
-	}
 }

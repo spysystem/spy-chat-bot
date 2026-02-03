@@ -12,7 +12,17 @@ export interface DatabaseConfig {
 export interface Message {
 	role: 'user' | 'assistant';
 	content: string;
+	detailedContent?: string;
 	timestamp: Date;
+	attachments?: AttachmentMeta[];
+}
+
+export interface AttachmentMeta {
+	id: string;
+	originalName: string;
+	mimeType: string;
+	sizeBytes: number;
+	storedPath: string;
 }
 
 export interface Chat {
@@ -21,10 +31,16 @@ export interface Chat {
 	messages: Array<{
 		role: 'user' | 'assistant';
 		content: string;
+		detailedContent?: string;
 		timestamp: string;
+		attachments?: AttachmentMeta[];
 	}>;
 	databaseName?: string;
 	branch?: string;
+	workingSummary?: {
+		text: string;
+		updatedAt: string;
+	};
 	createdAt: string;
 	updatedAt: string;
 }
@@ -36,6 +52,20 @@ export interface GitHubConfig {
 	branch: string;
 }
 
+export interface SchemaIndexProgress {
+	stage: string;
+	done: number;
+	total: number;
+}
+
+export interface SchemaIndexStatus {
+	exists: boolean;
+	filePath: string;
+	generatedAtIso?: string;
+	tableCount?: number;
+	source?: 'information_schema' | 'describe_fallback';
+}
+
 declare global {
 	interface Window {
 		electronAPI: {
@@ -43,30 +73,38 @@ declare global {
 			saveDatabaseConfig: (config: DatabaseConfig) => Promise<void>;
 			getDatabaseConfigs: () => Promise<DatabaseConfig[]>;
 			deleteDatabaseConfig: (id: string) => Promise<void>;
-			sendMessage: (message: string, databases: string[], history?: Array<{
+			getSchemaIndexStatus: (configId: string) => Promise<SchemaIndexStatus>;
+			generateSchemaIndex: (configId: string, databaseName: string) => Promise<SchemaIndexStatus>;
+			onSchemaIndexProgress: (callback: (progress: SchemaIndexProgress) => void) => () => void;
+			onSchemaIndexComplete: (callback: (status: SchemaIndexStatus) => void) => () => void;
+			onSchemaIndexError: (callback: (error: string) => void) => () => void;
+			saveAttachment: (chatId: string, originalName: string, mimeType: string | undefined, dataBase64: string) => Promise<AttachmentMeta>;
+			getAttachmentDataUrl: (storedPath: string, mimeType: string) => Promise<string>;
+			openAttachment: (storedPath: string) => Promise<{ success: boolean; error?: string }>;
+			sendMessage: (chatId: string, message: string, databases: string[], history?: Array<{
 				role: string;
 				content: string
-			}>, databaseName?: string) => Promise<string>;
+			}>, databaseName?: string, attachments?: AttachmentMeta[]) => Promise<{ shortAnswer: string; detailedAnswer: string }>;
 			getApiKey: () => Promise<string | null>;
 			saveApiKey: (apiKey: string) => Promise<void>;
-			generateTldr: (messageContent: string) => Promise<string>;
 			getChats: () => Promise<Chat[]>;
 			getChat: (chatId: string) => Promise<Chat | null>;
 			createChat: (title?: string) => Promise<Chat>;
 			updateChat: (chatId: string, messages: Array<{
 				role: 'user' | 'assistant';
 				content: string;
+				detailedContent?: string;
 				timestamp: string
 			}>, title?: string, databaseName?: string, branch?: string) => Promise<void>;
 			deleteChat: (chatId: string) => Promise<void>;
+			setWorkingSummary: (chatId: string, text: string) => Promise<void>;
+			clearWorkingSummary: (chatId: string) => Promise<void>;
 			onMessageProgress: (callback: (status: string) => void) => () => void;
 			getGitHubConfig: () => Promise<GitHubConfig | null>;
 			saveGitHubConfig: (config: GitHubConfig) => Promise<void>;
 			validateGitHubConfig: () => Promise<{ valid: boolean; error?: string; user?: string }>;
 			getUserName: () => Promise<string | null>;
 			saveUserName: (userName: string) => Promise<void>;
-			getAutoTldr: () => Promise<boolean>;
-			saveAutoTldr: (autoTldr: boolean) => Promise<void>;
 			openDebugWindow: () => Promise<void>;
 			focusWindow: () => Promise<void>;
 			onDeepLink: (callback: (url: string) => void) => () => void;

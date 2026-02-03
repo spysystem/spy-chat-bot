@@ -6,7 +6,15 @@ import {app} from 'electron';
 export interface ChatMessage {
 	role: 'user' | 'assistant';
 	content: string;
+	detailedContent?: string;
 	timestamp: string;
+	attachments?: Array<{
+		id: string;
+		originalName: string;
+		mimeType: string;
+		sizeBytes: number;
+		storedPath: string;
+	}>;
 }
 
 export interface Chat {
@@ -16,6 +24,10 @@ export interface Chat {
 	messages: ChatMessage[];
 	databaseName?: string;
 	branch?: string;
+	workingSummary?: {
+		text: string;
+		updatedAt: string;
+	};
 	createdAt: string;
 	updatedAt: string;
 }
@@ -50,6 +62,10 @@ export class ChatService {
 			id       : randomUUID(),
 			title,
 			messages : [],
+			workingSummary: {
+				text: '',
+				updatedAt: new Date().toISOString(),
+			},
 			createdAt: new Date().toISOString(),
 			updatedAt: new Date().toISOString(),
 		};
@@ -94,6 +110,26 @@ export class ChatService {
 		}
 
 		await this.saveChats(chats);
+	}
+
+	async setWorkingSummary(chatId: string, text: string): Promise<void> {
+		const chats     = await this.getChats();
+		const chatIndex = chats.findIndex((c) => c.id === chatId);
+		if (chatIndex === -1) {
+			throw new Error(`Chat not found: ${chatId}`);
+		}
+
+		chats[chatIndex].workingSummary = {
+			text,
+			updatedAt: new Date().toISOString(),
+		};
+		chats[chatIndex].updatedAt = new Date().toISOString();
+
+		await this.saveChats(chats);
+	}
+
+	async clearWorkingSummary(chatId: string): Promise<void> {
+		return await this.setWorkingSummary(chatId, '');
 	}
 
 	async deleteChat(chatId: string): Promise<void> {
