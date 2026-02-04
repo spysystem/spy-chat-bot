@@ -377,7 +377,7 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 										<button
 											className="details-button"
 											onClick={() => toggleExpanded(index)}
-											title={isExpanded ? 'Show short answer' : 'Show detailed answer'}
+											title={isExpanded ? 'Show a short answer' : 'Show a detailed answer'}
 										>
 											{isExpanded ? 'Short' : 'Details'}
 										</button>

@@ -80,7 +80,7 @@ export class ClaudeService {
 		return value;
 	}
 
-	private truncateLargeToolResult(result: unknown, maxRows: number = 100): { truncated: boolean; data: unknown } {
+	private truncateLargeToolResult(result: unknown, maxRows: number = 100, maxLines: number = 500): { truncated: boolean; data: unknown } {
 		// Check if result is a database query result with rows
 		const queryResult = result as { rows?: any[]; rowCount?: number; [key: string]: any };
 
@@ -91,18 +91,75 @@ export class ClaudeService {
 				// Truncate to maxRows and add metadata
 				return {
 					truncated: true,
-					data: {
+					data     : {
 						...queryResult,
-						rows: queryResult.rows.slice(0, maxRows),
-						originalRowCount: totalRows,
+						rows             : queryResult.rows.slice(0, maxRows),
+						originalRowCount : totalRows,
 						truncatedRowCount: maxRows,
-						truncationNote: `Result truncated: showing first ${maxRows} of ${totalRows} rows. Use LIMIT in your query to control output size.`,
+						truncationNote   : `Result truncated: showing first ${maxRows} of ${totalRows} rows. Use LIMIT in your query to control output size.`,
 					},
 				};
 			}
 		}
 
-		return { truncated: false, data: result };
+		// Check if result is a GitHub file content (string with many lines)
+		if (typeof result === 'string' && result.includes('\n')) {
+			const lines = result.split('\n');
+
+			if (lines.length > maxLines) {
+				const truncatedContent = lines.slice(0, maxLines).join('\n');
+				const remainingLines   = lines.length - maxLines;
+
+				const guidanceMessage = `
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FILE TRUNCATED - ${remainingLines} MORE LINES NOT SHOWN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Total lines in file: ${lines.length}
+Lines shown: ${maxLines}
+Lines omitted: ${remainingLines}
+
+TO ACCESS THE REST OF THE FILE:
+
+1. Use the 'search_code' tool to find specific functions, classes, or methods you need.
+   Example: search_code("function generateEanExcel")
+   Example: search_code("class POrder")
+
+2. Search for specific keywords or patterns that appear in the code you're looking for.
+   Example: search_code("Size column Excel")
+
+3. If you need a specific section, ask the user to search for it in their local codebase
+   and paste the relevant code snippet.
+
+This truncation prevents token limit errors. Use targeted searches instead of reading entire large files.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
+
+				return {
+					truncated: true,
+					data     : truncatedContent + guidanceMessage,
+				};
+			}
+		}
+
+		// Check if result is a GitHub search result array
+		if (Array.isArray(result)) {
+			const maxResults = 10; // Limit search results to first 10
+
+			if (result.length > maxResults) {
+				return {
+					truncated: true,
+					data     : [
+						...result.slice(0, maxResults),
+						{
+							truncationNote: `Search results truncated: showing first ${maxResults} of ${result.length} results. Refine your search query for more specific results.`,
+						},
+					],
+				};
+			}
+		}
+
+		return {truncated: false, data: result};
 	}
 
 	private async exportToCsv(filename: string, data: Array<Record<string, unknown>>): Promise<Record<string, unknown>> {
@@ -161,7 +218,7 @@ export class ClaudeService {
 		};
 
 		const extractSearchKeywords = (text: string, max: number = 4): string[] => {
-			const stop = new Set([
+			const stop  = new Set([
 				'hvordan', 'hvor', 'hvad', 'hvem', 'hvorfor', 'kan', 'jeg', 'vi', 'man', 'min', 'mit', 'mine',
 				'det', 'den', 'der', 'som', 'til', 'på', 'i', 'af', 'og', 'eller', 'med', 'fra', 'for', 'at',
 				'the', 'a', 'an', 'and', 'or', 'to', 'in', 'on', 'of', 'for', 'with', 'is', 'are', 'do', 'does',
@@ -467,13 +524,13 @@ export class ClaudeService {
 		if (hasGitHub && githubConfig) {
 			tools.push({
 				name        : 'search_code',
-				description : `Search for code in the ${githubConfig.owner}/${githubConfig.repo} repository`,
+				description : `Search for code in the ${githubConfig.owner}/${githubConfig.repo} repository. WARNING: Results are limited to first 10 matches to prevent token overflow. Use specific queries to find the most relevant files.`,
 				input_schema: {
 					type      : 'object',
 					properties: {
 						query: {
 							type       : 'string',
-							description: 'Search query (e.g., "function calculatePrice", "class Customer")',
+							description: 'Specific search query (e.g., "function calculatePrice", "class Customer"). Make it precise to get the most relevant results.',
 						},
 					},
 					required  : ['query'],
@@ -482,7 +539,7 @@ export class ClaudeService {
 
 			tools.push({
 				name        : 'read_file',
-				description : `Read the contents of a file from the ${githubConfig.owner}/${githubConfig.repo} repository`,
+				description : `Read the contents of a file from the ${githubConfig.owner}/${githubConfig.repo} repository. WARNING: Files over 500 lines are automatically truncated to prevent token limit errors. Read only essential files and avoid reading many large files in one request.`,
 				input_schema: {
 					type      : 'object',
 					properties: {
@@ -535,7 +592,7 @@ export class ClaudeService {
 		}
 
 		// Add the new user message (with optional attachments)
-		let userText = userMessage;
+		let userText               = userMessage;
 		const contentBlocks: any[] = [];
 		try {
 			if (attachments && attachments.length > 0) {
@@ -588,10 +645,10 @@ export class ClaudeService {
 				const githubConfigForUi = await githubService.getConfig();
 				if (githubConfigForUi) {
 					onProgress?.('Searching UI codebase...');
-					const keywords = extractSearchKeywords(userMessage, 4);
+					const keywords      = extractSearchKeywords(userMessage, 4);
 					// Prefer user text; fallback to keyword query if needed.
-					const query = keywords.length > 0 ? keywords.join(' ') : userMessage;
-					const uiResults = await githubService.searchCode(query);
+					const query         = keywords.length > 0 ? keywords.join(' ') : userMessage;
+					const uiResults     = await githubService.searchCode(query);
 					uiCodeSearchSection = formatUiCodeSearchResults(uiResults);
 					if (uiCodeSearchSection) {
 						onDebugLog?.('info', 'UI Grounding', `Found ${uiResults.length} code search results for: ${query}`);
@@ -690,7 +747,17 @@ When reading or analyzing code (from GitHub, database queries, or any source):
 - ALWAYS ignore all comments in the code
 - Only analyze the actual code implementation
 - Comments may be outdated, misleading, or incorrect
-- Base your understanding solely on what the code actually does, not what comments say it does`;
+- Base your understanding solely on what the code actually does, not what comments say it does
+
+LARGE FILE STRATEGY:
+When a file is too large and gets truncated (>500 lines):
+1. DO NOT say "I cannot see the file" or "file is too large"
+2. IMMEDIATELY use 'search_code' to find the specific function/class/method you need
+   - Example: If looking for generateEanExcel(), use search_code("function generateEanExcel")
+   - Example: If looking for a specific feature, use search_code("Size column Excel")
+3. The search will show you code snippets from across the repository
+4. Use those snippets to answer the question
+5. Only if search fails, then ask the user for more information`;
 
 		// Load working summary for this chat (if present)
 		let workingSummaryText = '';
@@ -883,10 +950,18 @@ OUTPUT RULES
 			onDebugLog?.('api', 'Claude API', `Including ${contextDocuments.length} vector store documents in system prompt`);
 		}
 
+		// Use prompt caching to reduce token usage and avoid token limit errors
+		// Cache the system prompt since it's large and relatively stable
 		let response = await client.messages.create({
 			model     : 'claude-sonnet-4-5-20250929',
 			max_tokens: 4096,
-			system    : systemPrompt,
+			system    : [
+				{
+					type         : 'text',
+					text         : systemPrompt,
+					cache_control: {type: 'ephemeral'},
+				},
+			],
 			tools,
 			messages,
 			thinking  : {
@@ -1183,7 +1258,7 @@ OUTPUT RULES
 						}
 
 						// Truncate large query results to prevent token limit errors
-						const { truncated, data: processedResult } = this.truncateLargeToolResult(result);
+						const {truncated, data: processedResult} = this.truncateLargeToolResult(result);
 						if (truncated) {
 							onDebugLog?.('info', 'Query Truncation', `Large query result truncated to prevent token limit errors`);
 						}
@@ -1308,7 +1383,13 @@ OUTPUT RULES
 			response = await client.messages.create({
 				model     : 'claude-sonnet-4-5-20250929',
 				max_tokens: 4096,
-				system    : systemPrompt,
+				system    : [
+					{
+						type         : 'text',
+						text         : systemPrompt,
+						cache_control: {type: 'ephemeral'},
+					},
+				],
 				tools,
 				messages,
 				thinking  : {
@@ -1419,7 +1500,13 @@ OUTPUT RULES
 			const answerResponse = await client.messages.create({
 				model     : 'claude-sonnet-4-5-20250929',
 				max_tokens: 4096,
-				system    : systemPrompt,
+				system    : [
+					{
+						type         : 'text',
+						text         : systemPrompt,
+						cache_control: {type: 'ephemeral'},
+					},
+				],
 				messages,
 			});
 
@@ -1501,7 +1588,7 @@ Balance: Be clear and accessible, but not dumbed down. Respect that support staf
 		}
 
 		return {
-			shortAnswer   : simplifiedText,
+			shortAnswer: simplifiedText,
 			detailedAnswer,
 		};
 	}
