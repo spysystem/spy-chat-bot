@@ -6,6 +6,25 @@
 	position: relative;
 }
 
+.chat-title-bar {
+	padding: 16px 32px;
+	background: var(--bg-secondary);
+	border-bottom: 1px solid var(--border-color);
+	display: flex;
+	align-items: center;
+}
+
+.chat-title {
+	font-size: 16px;
+	font-weight: 800;
+	color: var(--text-primary);
+	letter-spacing: -0.2px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	max-width: 100%;
+}
+
 .database-selector {
 	padding: 20px 32px;
 	background: var(--bg-secondary);
@@ -13,6 +32,202 @@
 	display: flex;
 	align-items: center;
 	gap: 12px;
+}
+
+.system-selector {
+	padding: 20px 32px;
+	background: var(--bg-secondary);
+	border-bottom: 1px solid var(--border-color);
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+	position: relative;
+	z-index: 15;
+}
+
+.system-selector-row {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	flex-wrap: wrap;
+}
+
+.system-selector label {
+	font-size: 14px;
+	font-weight: 600;
+	color: var(--text-primary);
+	white-space: nowrap;
+}
+
+.system-search-input {
+	padding: 10px 16px;
+	background: var(--bg-primary);
+	border: 1px solid var(--border-color);
+	border-radius: 10px;
+	color: var(--text-primary);
+	font-size: 14px;
+	font-weight: 500;
+	transition: all 0.2s ease;
+	width: 100%;
+	max-width: 100%;
+	flex: 0 0 auto;
+}
+
+.system-search-wrapper {
+	position: relative;
+	width: 420px;
+	max-width: 100%;
+}
+
+.system-search-input:focus {
+	outline: none;
+	border-color: var(--accent-color);
+	box-shadow: 0 0 0 3px rgba(47, 129, 247, 0.1);
+}
+
+.system-search-input:disabled {
+	opacity: 0.6;
+	cursor: not-allowed;
+}
+
+.system-filters {
+	display: flex;
+	align-items: center;
+	gap: 14px;
+	margin-left: auto;
+}
+
+.system-checkbox {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 13px;
+	color: var(--text-primary);
+	user-select: none;
+	cursor: pointer;
+	padding: 8px 12px;
+	border-radius: 999px;
+	border: 1px solid var(--border-color);
+	background: var(--bg-primary);
+	transition: all 0.15s ease;
+}
+
+.system-checkbox:hover {
+	border-color: var(--accent-color);
+	background: var(--bg-hover);
+}
+
+.system-checkbox.checked {
+	border-color: var(--accent-color);
+	background: rgba(47, 129, 247, 0.12);
+}
+
+.system-checkbox input {
+	transform: translateY(1px);
+}
+
+.system-checkbox input {
+	display: none;
+}
+
+.system-checkbox span {
+	font-weight: 700;
+}
+
+.system-results {
+	position: absolute;
+	left: 0;
+	right: 0;
+	top: calc(100% + 8px);
+	background: var(--bg-primary);
+	border: 1px solid var(--border-color);
+	border-radius: 14px;
+	box-shadow: var(--shadow-md);
+	overflow: hidden;
+	max-height: 360px;
+	overflow-y: auto;
+}
+
+.system-results-row {
+	padding: 12px 14px;
+	font-size: 13px;
+	color: var(--text-secondary);
+	border-bottom: 1px solid var(--border-color);
+	background: var(--bg-secondary);
+}
+
+.system-results-row:last-child {
+	border-bottom: none;
+}
+
+.system-results-error {
+	color: var(--danger-color);
+}
+
+.system-result-item {
+	width: 100%;
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	padding: 12px 14px;
+	background: var(--bg-primary);
+	border: none;
+	border-bottom: 1px solid var(--border-color);
+	color: var(--text-primary);
+	cursor: pointer;
+	text-align: left;
+}
+
+.system-result-item:hover {
+	background: var(--bg-hover);
+}
+
+.system-result-item:last-child {
+	border-bottom: none;
+}
+
+.system-result-main {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	min-width: 0;
+	flex: 1;
+}
+
+.system-result-name {
+	font-size: 14px;
+	font-weight: 700;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.system-result-meta {
+	font-size: 12px;
+	color: var(--text-secondary);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.system-result-release {
+	font-size: 12px;
+	font-family: "Monaco", "Menlo", "Consolas", monospace;
+	color: var(--text-secondary);
+	white-space: nowrap;
+}
+
+.system-dev-host {
+	font-size: 12px;
+	color: var(--text-secondary);
+	white-space: nowrap;
+}
+
+.system-dev-host-value {
+	font-family: "Monaco", "Menlo", "Consolas", monospace;
+	color: var(--text-primary);
+	font-weight: 600;
 }
 
 .database-selector label {
@@ -661,7 +876,7 @@
 	display: flex;
 	gap: 15px;
 	position: absolute;
-	top: 20px;
+	top: 10px;
 	right: 32px;
 }
 

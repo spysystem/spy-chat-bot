@@ -22,6 +22,15 @@ export interface Chat {
 
 	title: string;
 	messages: ChatMessage[];
+
+	// Per-chat system context (selected from System Directory API or dev-mode input)
+	systemKey?: string;
+	systemName?: string;
+	dbHost?: string;
+	release?: string;
+	isRestore?: boolean;
+	isDevMode?: boolean;
+
 	databaseName?: string;
 	branch?: string;
 	workingSummary?: {
@@ -30,6 +39,71 @@ export interface Chat {
 	};
 	createdAt: string;
 	updatedAt: string;
+}
+
+export interface ChatUpdate {
+	title?: string;
+	databaseName?: string;
+	branch?: string;
+	systemKey?: string;
+	systemName?: string;
+	dbHost?: string;
+	release?: string;
+	isRestore?: boolean;
+	isDevMode?: boolean;
+}
+
+function normalizeTitleSeed(value: string): string {
+	return value
+		.replace(/\s+/g, ' ')
+		.replace(/[^\p{L}\p{N}\s_-]+/gu, '')
+		.trim();
+}
+
+function generateChatTitle(messages: ChatMessage[], context?: { systemName?: string; databaseName?: string }): string {
+	// Title generation is deterministic and does not call external services.
+	// Keep it stable by using up to the first 3 user messages.
+	const userTexts = messages
+		.filter((m) => m.role === 'user')
+		.map((m) => normalizeTitleSeed(m.content))
+		.filter((t) => t.length >= 4)
+		.slice(0, 3);
+
+	const contextPrefixRaw = normalizeTitleSeed(context?.systemName || '') || normalizeTitleSeed(context?.databaseName || '');
+	const contextPrefix    = contextPrefixRaw ? `${contextPrefixRaw} - ` : '';
+
+	if (userTexts.length === 0) {
+		return contextPrefixRaw || 'New Chat';
+	}
+
+	const joined = userTexts.join(' ');
+	const stop   = new Set([
+		// Danish
+		'og', 'eller', 'men', 'det', 'den', 'der', 'som', 'til', 'på', 'i', 'af', 'for', 'med', 'fra', 'kan', 'skal', 'vil',
+		'hvad', 'hvor', 'hvordan', 'hvem', 'hvorfor', 'lige', 'meget', 'bare', 'når', 'ikke', 'ingen', 'min', 'mit', 'mine',
+		// English
+		'the', 'a', 'an', 'and', 'or', 'but', 'to', 'in', 'on', 'of', 'for', 'with', 'from', 'can', 'should', 'will', 'what', 'where', 'how', 'why',
+	]);
+
+	const tokens = (joined.toLowerCase().match(/[\p{L}\p{N}_-]{3,}/gu) || [])
+		.filter((t) => !stop.has(t));
+
+	const counts = new Map<string, number>();
+	for (const t of tokens) {
+		counts.set(t, (counts.get(t) ?? 0) + 1);
+	}
+
+	const top = Array.from(counts.entries())
+		.sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+		.slice(0, 4)
+		.map(([t]) => t);
+
+	const keywordTitle = top.length > 0 ? top.join(' ') : userTexts[0];
+	const full         = `${contextPrefix}${keywordTitle}`.trim();
+
+	// Clamp length for UI.
+	const maxLen = 60;
+	return full.length > maxLen ? `${full.substring(0, maxLen - 3)}...` : full;
 }
 
 export class ChatService {
@@ -59,15 +133,15 @@ export class ChatService {
 
 	async createChat(title: string = 'New Chat'): Promise<Chat> {
 		const chat: Chat = {
-			id       : randomUUID(),
+			id            : randomUUID(),
 			title,
-			messages : [],
+			messages      : [],
 			workingSummary: {
-				text: '',
+				text     : '',
 				updatedAt: new Date().toISOString(),
 			},
-			createdAt: new Date().toISOString(),
-			updatedAt: new Date().toISOString(),
+			createdAt     : new Date().toISOString(),
+			updatedAt     : new Date().toISOString(),
 		};
 
 		const chats = await this.getChats();
@@ -77,7 +151,7 @@ export class ChatService {
 		return chat;
 	}
 
-	async updateChat(chatId: string, messages: ChatMessage[], title?: string, databaseName?: string, branch?: string): Promise<void> {
+	async updateChat(chatId: string, messages: ChatMessage[], update?: ChatUpdate): Promise<void> {
 		const chats     = await this.getChats();
 		const chatIndex = chats.findIndex((c) => c.id === chatId);
 
@@ -88,25 +162,41 @@ export class ChatService {
 		chats[chatIndex].messages  = messages;
 		chats[chatIndex].updatedAt = new Date().toISOString();
 
-		// Update database name if provided
-		if (databaseName !== undefined) {
-			chats[chatIndex].databaseName = databaseName;
-		}
-
-		// Update branch if provided
-		if (branch !== undefined) {
-			chats[chatIndex].branch = branch;
+		if (update) {
+			if (update.databaseName !== undefined) {
+				chats[chatIndex].databaseName = update.databaseName;
+			}
+			if (update.branch !== undefined) {
+				chats[chatIndex].branch = update.branch;
+			}
+			if (update.systemKey !== undefined) {
+				chats[chatIndex].systemKey = update.systemKey;
+			}
+			if (update.systemName !== undefined) {
+				chats[chatIndex].systemName = update.systemName;
+			}
+			if (update.dbHost !== undefined) {
+				chats[chatIndex].dbHost = update.dbHost;
+			}
+			if (update.release !== undefined) {
+				chats[chatIndex].release = update.release;
+			}
+			if (update.isRestore !== undefined) {
+				chats[chatIndex].isRestore = update.isRestore;
+			}
+			if (update.isDevMode !== undefined) {
+				chats[chatIndex].isDevMode = update.isDevMode;
+			}
 		}
 
 		// Auto-generate title from first user message if not set
-		if (title) {
-			chats[chatIndex].title = title;
-		} else if (chats[chatIndex].title === 'New Chat' && messages.length > 0) {
-			const firstUserMessage = messages.find((m) => m.role === 'user');
-			if (firstUserMessage) {
-				chats[chatIndex].title = firstUserMessage.content.substring(0, 50) +
-					(firstUserMessage.content.length > 50 ? '...' : '');
-			}
+		if (update?.title) {
+			chats[chatIndex].title = update.title;
+		} else {
+			chats[chatIndex].title = generateChatTitle(messages, {
+				systemName  : chats[chatIndex].systemName,
+				databaseName: chats[chatIndex].databaseName,
+			});
 		}
 
 		await this.saveChats(chats);
@@ -123,7 +213,7 @@ export class ChatService {
 			text,
 			updatedAt: new Date().toISOString(),
 		};
-		chats[chatIndex].updatedAt = new Date().toISOString();
+		chats[chatIndex].updatedAt      = new Date().toISOString();
 
 		await this.saveChats(chats);
 	}

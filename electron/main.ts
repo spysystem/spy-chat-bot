@@ -1,7 +1,7 @@
 import {app, BrowserWindow, ipcMain} from 'electron';
 import {autoUpdater} from 'electron-updater';
 import * as path from 'path';
-import type {ChatMessage} from './services/chat-service';
+import type {ChatMessage, ChatUpdate} from './services/chat-service';
 import {ChatService} from './services/chat-service';
 import {ClaudeService} from './services/claude-service';
 import {AttachmentService} from './services/attachment-service';
@@ -11,6 +11,7 @@ import type {GitHubConfig} from './services/github-service';
 import {GitHubService} from './services/github-service';
 import {SecureStorageService} from './services/secure-storage-service';
 import {SettingsService} from './services/settings-service';
+import {SystemDirectoryService} from './services/system-directory-service';
 import type {DatabaseConfig} from './types';
 
 let mainWindow: BrowserWindow | null  = null;
@@ -18,14 +19,15 @@ let debugWindow: BrowserWindow | null = null;
 let pendingDeepLink: string | null    = null;
 
 // Initialize services with secure storage
-const secureStorage      = new SecureStorageService();
-const claudeService      = new ClaudeService(secureStorage);
-const databaseService    = new DatabaseService(secureStorage);
-const schemaIndexService = new SchemaIndexService();
-const attachmentService  = new AttachmentService(10 * 1024 * 1024);
-const chatService        = new ChatService();
-const githubService      = new GitHubService(secureStorage);
-const settingsService    = new SettingsService();
+const secureStorage          = new SecureStorageService();
+const claudeService          = new ClaudeService(secureStorage);
+const databaseService        = new DatabaseService(secureStorage);
+const schemaIndexService     = new SchemaIndexService();
+const attachmentService      = new AttachmentService(10 * 1024 * 1024);
+const chatService            = new ChatService();
+const githubService          = new GitHubService(secureStorage);
+const settingsService        = new SettingsService();
+const systemDirectoryService = new SystemDirectoryService();
 
 // Configure auto-updater
 autoUpdater.autoDownload         = true;
@@ -214,6 +216,11 @@ ipcMain.handle('delete-database-config', async (_event, id: string) => {
 	return await databaseService.deleteConfig(id);
 });
 
+// System directory (customer/system list)
+ipcMain.handle('get-systems', async (_event, statuses?: string[]) => {
+	return await systemDirectoryService.getSystems(statuses);
+});
+
 // Schema index
 ipcMain.handle('get-schema-index-status', async (_event, configId: string) => {
 	return await schemaIndexService.getStatus(configId);
@@ -256,7 +263,7 @@ ipcMain.handle('open-attachment', async (_event, storedPath: string) => {
 ipcMain.handle('send-message', async (event, chatId: string, message: string, databases: string[], history?: Array<{
 	role: string;
 	content: string
-}>, databaseName?: string, attachments?: any[]) => {
+}>, chatContext?: { databaseName?: string; dbHost?: string; githubBranch?: string }, attachments?: any[]) => {
 	const onProgress = (status: string) => {
 		event.sender.send('message-progress', status);
 	};
@@ -265,7 +272,23 @@ ipcMain.handle('send-message', async (event, chatId: string, message: string, da
 		sendDebugLog(type, category, message, details);
 	};
 
-	return await claudeService.sendMessage(chatId, message, databases, databaseService, githubService, schemaIndexService, chatService, attachmentService, onProgress, history, databaseName, attachments, onDebugLog);
+	return await claudeService.sendMessage(
+		chatId,
+		message,
+		databases,
+		databaseService,
+		githubService,
+		schemaIndexService,
+		chatService,
+		attachmentService,
+		onProgress,
+		history,
+		chatContext?.databaseName,
+		chatContext?.dbHost,
+		chatContext?.githubBranch,
+		attachments,
+		onDebugLog,
+	);
 });
 
 ipcMain.handle('get-api-key', async () => {
@@ -294,8 +317,18 @@ ipcMain.handle('create-chat', async (_event, title?: string) => {
 	return await chatService.createChat(title);
 });
 
-ipcMain.handle('update-chat', async (_event, chatId: string, messages: ChatMessage[], title?: string, databaseName?: string, branch?: string) => {
-	return await chatService.updateChat(chatId, messages, title, databaseName, branch);
+ipcMain.handle('update-chat', async (_event, chatId: string, messages: ChatMessage[], updateOrTitle?: ChatUpdate | string, databaseName?: string, branch?: string) => {
+	// Backwards compatibility: older renderer passed (title, databaseName, branch).
+	if (typeof updateOrTitle === 'string' || databaseName !== undefined || branch !== undefined) {
+		const update: ChatUpdate = {
+			title: typeof updateOrTitle === 'string' ? updateOrTitle : undefined,
+			databaseName,
+			branch,
+		};
+		return await chatService.updateChat(chatId, messages, update);
+	}
+
+	return await chatService.updateChat(chatId, messages, updateOrTitle as ChatUpdate | undefined);
 });
 
 ipcMain.handle('delete-chat', async (_event, chatId: string) => {

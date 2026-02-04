@@ -207,9 +207,31 @@ This truncation prevents token limit errors. Use targeted searches instead of re
 		onProgress?: (status: string) => void,
 		conversationHistory?: Array<{ role: string; content: string }>,
 		databaseName?: string,
+		dbHostOverride?: string,
+		githubBranchOverride?: string,
 		attachments?: AttachmentMeta[],
 		onDebugLog?: (type: 'query' | 'tool' | 'api' | 'error' | 'info', category: string, message: string, details?: string) => void,
-	): Promise<{ shortAnswer: string; detailedAnswer: string }> {
+	): Promise<{ shortAnswer: string; detailedAnswer: string; suggestedTitle?: string }> {
+		const detectDesiredDetailLevel = (text: string): 'short' | 'medium' | 'detailed' => {
+			const t = text.toLowerCase();
+
+			// If the user explicitly asks for technical artifacts or deeper explanation, allow more detail.
+			const asksForTechnical  = /(\bcode\b|\bkode\b|\bsql\b|\bquery\b|\bklasse\b|\bclass\b|\bfil\b|\bfile\b|\blinje\b|\bline\b|\bstack\b|\btrace\b|\bfejl\b|\berror\b|\bdebug\b|\bipc\b|\belectron\b|\bnode\b|\breact\b|\btypescript\b|\bapi\b)/i
+				.test(t);
+			const asksForMoreDetail = /(\bdetalj|detaljer|uddyb|uddybning|forklar|forklaring|explain|deep|dyb|mere\b)/i
+				.test(t);
+			const asksForSteps      = /(\btrin\b|\bsteps?\b|\bstep-by-step\b|\bpunkt(?:er)?\b|\bcheckliste\b)/i
+				.test(t);
+
+			if (asksForTechnical || asksForMoreDetail) {
+				return 'detailed';
+			}
+			if (asksForSteps) {
+				return 'medium';
+			}
+			return 'short';
+		};
+
 		const looksLikeUiQuestion = (text: string): boolean => {
 			const t = text.toLowerCase();
 			// Danish + English UI intent keywords
@@ -392,7 +414,9 @@ This truncation prevents token limit errors. Use targeted searches instead of re
 
 		// Get database connection info for context
 		let dbServerHost = '';
-		if (databaseIds.length > 0) {
+		if (dbHostOverride && String(dbHostOverride).trim() !== '') {
+			dbServerHost = String(dbHostOverride).trim();
+		} else if (databaseIds.length > 0) {
 			const configs = await databaseService.getConfigs();
 			const config  = configs.find((c) => c.id === databaseIds[0]);
 			if (config) {
@@ -1016,18 +1040,18 @@ OUTPUT RULES
 							const filePath = toolInput.file_path as string;
 							onProgress?.(`Reading file: ${filePath} (${currentTool}/${toolCount})`);
 							onDebugLog?.('tool', 'GitHub', `Reading file: ${filePath}`, `Tool: ${toolName}\nFile: ${filePath}`);
-							result = await githubService.getFileContent(filePath);
+							result = await githubService.getFileContent(filePath, githubBranchOverride);
 							onDebugLog?.('tool', 'GitHub', `File read successfully: ${filePath}`);
 						} else if (toolName === 'list_files') {
 							const dirPath = toolInput.directory_path as string;
 							onProgress?.(`Listing files in: ${dirPath || '/'} (${currentTool}/${toolCount})`);
 							onDebugLog?.('tool', 'GitHub', `Listing files in: ${dirPath || '/'}`, `Tool: ${toolName}\nDirectory: ${dirPath}`);
-							result = await githubService.listFiles(dirPath);
+							result = await githubService.listFiles(dirPath, githubBranchOverride);
 							onDebugLog?.('tool', 'GitHub', `Listed ${(result as any).length || 0} files`);
 						} else if (toolName === 'get_repository_structure') {
 							onProgress?.(`Getting repository structure (${currentTool}/${toolCount})`);
 							onDebugLog?.('tool', 'GitHub', `Getting repository structure`, `Tool: ${toolName}`);
-							result = await githubService.getTree(true);
+							result = await githubService.getTree(true, githubBranchOverride);
 							onDebugLog?.('tool', 'GitHub', `Repository structure retrieved`);
 						}
 						// Handle CSV export tool
@@ -1040,7 +1064,7 @@ OUTPUT RULES
 							const config  = configs.find((c) => c.id === databaseIds[0]);
 
 							if (!config) {
-								throw new Error('Database config not found for CSV export');
+								throw new Error('Database config is not found for CSV export');
 							}
 
 							onProgress?.(`Exporting to CSV: ${filename}.csv (${currentTool}/${toolCount})`);
@@ -1051,6 +1075,7 @@ OUTPUT RULES
 								config.id,
 								query,
 								databaseName,
+								dbHostOverride,
 							);
 
 							const queryResultObj = queryResult as { rows?: any[]; rowCount?: number };
@@ -1112,6 +1137,7 @@ OUTPUT RULES
 								config.id,
 								query,
 								databaseName,
+								dbHostOverride,
 							);
 
 							// Track query results for potential CSV export
@@ -1135,7 +1161,7 @@ OUTPUT RULES
 
 							onProgress?.(`Listing tables in ${config.name} (${currentTool}/${toolCount})`);
 							onDebugLog?.('query', 'Database Schema', `Listing tables in ${databaseName}`, `SHOW TABLES`);
-							result = await databaseService.listTables(config.id, databaseName);
+							result = await databaseService.listTables(config.id, databaseName, dbHostOverride);
 							onDebugLog?.('query', 'Database Schema', `Found ${(result as string[]).length} tables`);
 						} else if (toolName.startsWith('search_schema_')) {
 							// Find which database this tool belongs to
@@ -1253,6 +1279,7 @@ OUTPUT RULES
 								config.id,
 								tableName,
 								databaseName,
+								dbHostOverride,
 							);
 							onDebugLog?.('query', 'Database Schema', `Table schema retrieved for ${tableName}`);
 						}
@@ -1454,27 +1481,7 @@ OUTPUT RULES
 		}
 		onProgress?.('Finishing answer...');
 
-		// Start a fresh conversation for the simplification step
-		// This avoids sending tool_use/tool_result blocks which can cause API errors
-		const simplificationMessages: Anthropic.MessageParam[] = [];
-
-		// Only add the conversation history (without tool blocks)
-		if (conversationHistory && conversationHistory.length > 0) {
-			for (const msg of conversationHistory) {
-				simplificationMessages.push({
-					role   : msg.role as 'user' | 'assistant',
-					content: msg.content,
-				});
-			}
-		}
-
-		// Add the user's question
-		simplificationMessages.push({
-			role   : 'user',
-			content: userMessage,
-		});
-
-		// Add Claude's technical response (extract text only, no tool_use blocks).
+		// Extract Claude's technical response (text only, no tool_use blocks).
 		// We will return this to the UI as the "detailed" answer.
 		let detailedAnswer = response.content
 			.filter((c) => c.type === 'text')
@@ -1484,10 +1491,6 @@ OUTPUT RULES
 
 		// Only add the technical answer if it's not empty
 		if (detailedAnswer) {
-			simplificationMessages.push({
-				role   : 'assistant',
-				content: detailedAnswer,
-			});
 		} else {
 			// If Claude didn't provide a text response (only used tools), ask for an answer first
 			// Use the FULL messages array (with tool results) to get a complete answer
@@ -1517,24 +1520,47 @@ OUTPUT RULES
 
 			// Use this as the detailed answer when Claude produced only tool blocks before.
 			detailedAnswer = answer.trim();
-
-			simplificationMessages.push({
-				role   : 'assistant',
-				content: answer,
-			});
 		}
 
-		// Ask Claude to rewrite it in clear language for support staff
-		simplificationMessages.push({
-			role   : 'user',
-			content: `Now rewrite your answer for customer support staff in a clear and helpful way.
+		// Start a fresh conversation for the simplification step (no history).
+		// IMPORTANT: We intentionally do NOT include conversationHistory here.
+		// Reason: For follow-up questions, history can cause the model to rewrite/summarize an older assistant message.
+		const desiredDetailLevel = detectDesiredDetailLevel(userMessage);
+		const detailedLinesCount = detailedAnswer ? detailedAnswer.split('\n').filter((l) => l.trim() !== '').length : 0;
 
-CRITICAL: Answer in the SAME LANGUAGE as the original question. If the question was in Danish, answer in Danish. If it was in English, answer in English.
+		// If the technical answer is already short, return it directly as the short answer.
+		// This avoids awkward "rewrites" that can remove important nuance.
+		const isAlreadyShort = detailedLinesCount > 0 && detailedLinesCount <= 4 && detailedAnswer.length <= 700;
+		if (isAlreadyShort && desiredDetailLevel === 'short') {
+			onProgress?.('Finalizing answer...');
+			return {
+				shortAnswer   : detailedAnswer,
+				detailedAnswer: detailedAnswer,
+			};
+		}
 
-OUTPUT LENGTH (VERY IMPORTANT):
+		const lengthRule = desiredDetailLevel === 'detailed'
+			? `OUTPUT LENGTH (VERY IMPORTANT):
+- You MAY write a longer answer (up to ~25 lines) if the user's question requires it.
+- Prefer clarity over brevity. Use short sections/bullets when helpful.
+- If you still cannot answer correctly, ask ONE clarifying question.`
+			: desiredDetailLevel === 'medium'
+				? `OUTPUT LENGTH (VERY IMPORTANT):
+- Default to a MEDIUM answer: up to ~10 lines.
+- If you cannot answer correctly within ~10 lines, ask ONE clarifying question.`
+				: `OUTPUT LENGTH (VERY IMPORTANT):
 - Default to a SHORT answer: maximum 3-4 lines total.
-- If the user explicitly asks for details (steps, lists, deep explanation, code/SQL), you may go longer.
-- If you cannot answer correctly in 3-4 lines, ask ONE clarifying question instead of writing a long answer.
+- If you cannot answer correctly in 3-4 lines, ask ONE clarifying question instead of writing a long answer.`;
+
+		const simplificationPrompt = `You will rewrite a technical assistant answer so it is clear for customer support staff.
+
+CRITICAL RULES:
+- Answer in the SAME LANGUAGE as the user's question.
+- Rewrite ONLY the "LATEST TECHNICAL ANSWER" provided below.
+- Do NOT summarize or rewrite any earlier conversation. Ignore anything not explicitly included below.
+- Keep the meaning and correctness. Do NOT invent details.
+
+${lengthRule}
 
 Guidelines:
 - Start with clear business language (customer, order, discount, price, invoice, delivery, etc.)
@@ -1543,10 +1569,21 @@ Guidelines:
 - BUT: If they ask for technical details (file names, class names, code locations, etc.), provide them directly
 - If they ask "what file", "what class", "where in the code" - answer specifically with file paths and names
 - Don't hide technical information when directly requested - support staff are capable of handling it
-- If you created a CSV file, mention where it was saved
+- If a CSV file was created, mention it and where it was saved
 
-Balance: Be clear and accessible, but not dumbed down. Respect that support staff can handle technical details when needed.`,
-		});
+INPUTS:
+LATEST USER QUESTION:
+${userMessage}
+
+LATEST TECHNICAL ANSWER:
+${detailedAnswer}`;
+
+		const simplificationMessages: Anthropic.MessageParam[] = [
+			{
+				role   : 'user',
+				content: simplificationPrompt,
+			},
+		];
 
 		// Get the simplified response (no tools needed here, CSV already created)
 		const simplifiedResponse = await client.messages.create({
@@ -1562,6 +1599,46 @@ Balance: Be clear and accessible, but not dumbed down. Respect that support staf
 			.filter((c) => c.type === 'text')
 			.map((c) => c.text)
 			.join('\n');
+
+		// Generate an AI title in the background (best-effort).
+		let suggestedTitle: string | undefined;
+		try {
+			const chat = await chatService.getChat(chatId);
+			const systemName = (chat?.systemName || '').trim();
+			const databaseNameForTitle = (chat?.databaseName || '').trim();
+			const context = systemName || databaseNameForTitle ? `Context:\n- System: ${systemName || '(none)'}\n- Database: ${databaseNameForTitle || '(none)'}\n` : '';
+
+			const titlePrompt = `Create a short chat title in Danish.\n\nRules:\n- 3 to 6 words\n- Plain text only (no quotes)\n- Must reflect what the chat is about\n- If context has a system name, you may include it\n\n${context}\nLatest user message:\n${userMessage}\n\nAssistant answer:\n${simplifiedText}`;
+
+			const titleResponse = await client.messages.create({
+				model     : 'claude-3-5-haiku-20241022',
+				max_tokens: 32,
+				messages  : [{role: 'user', content: titlePrompt}],
+			});
+
+			const raw = titleResponse.content
+				.filter((c) => c.type === 'text')
+				.map((c) => c.text)
+				.join('\n')
+				.trim();
+
+			const clean = raw
+				// Remove common prefixes the model may include.
+				.replace(/^\s*(titel|title)\s*:\s*/i, '')
+				// Remove leading bullets/dashes.
+				.replace(/^\s*[-–—]\s*/i, '')
+				// Strip surrounding quotes/backticks.
+				.replace(/^["'`]+|["'`]+$/g, '')
+				// Normalize whitespace.
+				.replace(/\s+/g, ' ')
+				.trim();
+
+			if (clean.length >= 3) {
+				suggestedTitle = clean.length > 60 ? `${clean.substring(0, 57)}...` : clean;
+			}
+		} catch (error) {
+			onDebugLog?.('error', 'Chat Title', 'Failed to generate AI title', String(error));
+		}
 
 		// Update working summary in the background (best-effort).
 		try {
@@ -1590,6 +1667,7 @@ Balance: Be clear and accessible, but not dumbed down. Respect that support staf
 		return {
 			shortAnswer: simplifiedText,
 			detailedAnswer,
+			suggestedTitle,
 		};
 	}
 }

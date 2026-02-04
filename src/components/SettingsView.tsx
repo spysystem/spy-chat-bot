@@ -3,34 +3,34 @@ import type {DatabaseConfig, GitHubConfig, SchemaIndexProgress, SchemaIndexStatu
 import './SettingsView.css';
 
 export function SettingsView(): JSX.Element {
-	const [connection, setConnection]             = useState<DatabaseConfig | null>(null);
-	const [isEditing, setIsEditing]               = useState<boolean>(false);
-	const [testResult, setTestResult]             = useState<{ success: boolean; error?: string } | null>(null);
+	const [connection, setConnection]                           = useState<DatabaseConfig | null>(null);
+	const [isEditing, setIsEditing]                             = useState<boolean>(false);
+	const [testResult, setTestResult]                           = useState<{ success: boolean; error?: string } | null>(null);
 	const [schemaIndexDatabaseName, setSchemaIndexDatabaseName] = useState<string>('');
-	const [schemaIndexStatus, setSchemaIndexStatus] = useState<SchemaIndexStatus | null>(null);
-	const [schemaIndexProgress, setSchemaIndexProgress] = useState<SchemaIndexProgress | null>(null);
-	const [schemaIndexError, setSchemaIndexError] = useState<string>('');
+	const [schemaIndexStatus, setSchemaIndexStatus]             = useState<SchemaIndexStatus | null>(null);
+	const [schemaIndexProgress, setSchemaIndexProgress]         = useState<SchemaIndexProgress | null>(null);
+	const [schemaIndexError, setSchemaIndexError]               = useState<string>('');
 	const [isGeneratingSchemaIndex, setIsGeneratingSchemaIndex] = useState<boolean>(false);
-	const [apiKey, setApiKey]                     = useState('');
-	const [apiKeyStatus, setApiKeyStatus]         = useState<'loading' | 'saved' | 'error' | 'none'>('loading');
-	const [apiKeyError, setApiKeyError]           = useState<string>('');
-	const [userName, setUserName]                 = useState('');
-	const [userNameStatus, setUserNameStatus]     = useState<'loading' | 'saved' | 'error' | 'none'>('loading');
-	const [githubConfig, setGithubConfig]         = useState<GitHubConfig>({
+	const [apiKey, setApiKey]                                   = useState('');
+	const [apiKeyStatus, setApiKeyStatus]                       = useState<'loading' | 'saved' | 'error' | 'none'>('loading');
+	const [apiKeyError, setApiKeyError]                         = useState<string>('');
+	const [userName, setUserName]                               = useState('');
+	const [userNameStatus, setUserNameStatus]                   = useState<'loading' | 'saved' | 'error' | 'none'>('loading');
+	const [githubConfig, setGithubConfig]                       = useState<GitHubConfig>({
 		token : '',
 		owner : '',
 		repo  : '',
 		branch: 'main',
 	});
-	const [githubStatus, setGithubStatus]         = useState<'loading' | 'saved' | 'error' | 'none'>('loading');
-	const [githubValidation, setGithubValidation] = useState<{
+	const [githubStatus, setGithubStatus]                       = useState<'loading' | 'saved' | 'error' | 'none'>('loading');
+	const [githubValidation, setGithubValidation]               = useState<{
 		testing: boolean;
 		result?: { valid: boolean; error?: string; user?: string }
 	}>({testing: false});
-	const [appVersion, setAppVersion]             = useState<string>('');
-	const [updateStatus, setUpdateStatus]         = useState<'checking' | 'available' | 'downloading' | 'ready' | 'none'>('none');
-	const [updateInfo, setUpdateInfo]             = useState<{ version?: string; progress?: number; error?: string }>({});
-	const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
+	const [appVersion, setAppVersion]                           = useState<string>('');
+	const [updateStatus, setUpdateStatus]                       = useState<'checking' | 'available' | 'downloading' | 'ready' | 'none'>('none');
+	const [updateInfo, setUpdateInfo]                           = useState<{ version?: string; progress?: number; error?: string }>({});
+	const [isCheckingUpdate, setIsCheckingUpdate]               = useState(false);
 
 	useEffect(() => {
 		loadConnection();
@@ -57,7 +57,7 @@ export function SettingsView(): JSX.Element {
 				setSchemaIndexProgress(null);
 			}, 1500);
 		});
-		const unsubscribeSchemaError = window.electronAPI.onSchemaIndexError((error) => {
+		const unsubscribeSchemaError    = window.electronAPI.onSchemaIndexError((error) => {
 			setSchemaIndexError(error);
 			setIsGeneratingSchemaIndex(false);
 		});
@@ -447,20 +447,6 @@ export function SettingsView(): JSX.Element {
 				</div>
 
 				<div className="form-group">
-					<label htmlFor="github-branch">Branch</label>
-					<input
-						id="github-branch"
-						type="text"
-						value={githubConfig.branch}
-						onChange={(event) => setGithubConfig({...githubConfig, branch: event.target.value})}
-						placeholder="main"
-					/>
-				</div>
-				<p className="help-text">
-					Standard branch til GitHub søgninger. Kan overskrives midlertidigt når du åbner chatten fra SPY systemet.
-				</p>
-
-				<div className="form-group">
 					<div className="form-btn-flex">
 						<button onClick={saveGitHubConfigFunction}>
 							Save GitHub Configuration
@@ -689,7 +675,8 @@ export function SettingsView(): JSX.Element {
 								placeholder="e.g. spy_live (sample DB)"
 							/>
 							<p className="help-text">
-								This is only used to generate the schema snapshot. The resulting schema index is shared across all databases on this connection.
+								This is only used to generate the schema snapshot. The resulting schema index is shared across all databases on this
+								connection.
 								Allowed characters: letters, numbers, underscore.
 							</p>
 						</div>

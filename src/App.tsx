@@ -106,28 +106,16 @@ export function App(): JSX.Element {
 			const database  = urlObject.searchParams.get('database');
 			const branch    = urlObject.searchParams.get('branch');
 
-			// If branch is provided, update GitHub config with this branch
-			if (branch) {
-				try {
-					const currentConfig = await window.electronAPI.getGitHubConfig();
-					if (currentConfig) {
-						await window.electronAPI.saveGitHubConfig({
-							...currentConfig,
-							branch: branch,
-						});
-						console.log(`Updated GitHub branch to: ${branch}`);
-					}
-				} catch (error) {
-					console.error('Error updating GitHub branch:', error);
-				}
-			}
-
 			if (database) {
 				// Create new chat
 				const newChat = await window.electronAPI.createChat(`Query: ${database}`);
 
 				// Update chat with database name and branch
-				await window.electronAPI.updateChat(newChat.id, [], newChat.title, database, branch || undefined);
+				await window.electronAPI.updateChat(newChat.id, [], {
+					title       : newChat.title,
+					databaseName: database,
+					branch      : branch || undefined,
+				});
 
 				// Add to chats list and set as current
 				setChats((previous) => [newChat, ...previous]);

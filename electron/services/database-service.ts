@@ -184,14 +184,14 @@ export class DatabaseService {
 		}
 	}
 
-	async getConnection(configId: string, databaseName?: string): Promise<mysql.Connection> {
+	async getConnection(configId: string, databaseName?: string, hostOverride?: string, portOverride?: number): Promise<mysql.Connection> {
 		// Use provided database name, or throw error if none provided
 		if (!databaseName) {
 			throw new Error('Database name must be provided');
 		}
 
 		// Create unique key for connection cache
-		const connectionKey = `${configId}:${databaseName}`;
+		const connectionKey = `${configId}:${hostOverride ?? 'default'}:${portOverride ?? 'default'}:${databaseName}`;
 
 		// Return existing connection if available
 		if (this.connections.has(connectionKey)) {
@@ -208,8 +208,8 @@ export class DatabaseService {
 
 		// CRITICAL SECURITY: Create connection with read-only protections
 		const connection = await mysql.createConnection({
-			host    : config.host,
-			port    : config.port,
+			host    : hostOverride ?? config.host,
+			port    : portOverride ?? config.port,
 			user    : config.username,
 			password: config.password,
 			database: databaseName,
@@ -231,7 +231,7 @@ export class DatabaseService {
 		return connection;
 	}
 
-	async executeQuery(configId: string, query: string, databaseName?: string): Promise<QueryResult> {
+	async executeQuery(configId: string, query: string, databaseName?: string, hostOverride?: string, portOverride?: number): Promise<QueryResult> {
 		try {
 			// CRITICAL SECURITY: Multiple layers of read-only enforcement
 			const normalizedQuery = query.trim().toUpperCase();
@@ -291,7 +291,7 @@ export class DatabaseService {
 			}
 
 			// LAYER 4: MySQL enforced read-only transaction (set in getConnection)
-			const connection     = await this.getConnection(configId, databaseName);
+			const connection     = await this.getConnection(configId, databaseName, hostOverride, portOverride);
 			const [rows, fields] = await connection.query(query);
 
 			const result = {
@@ -314,12 +314,12 @@ export class DatabaseService {
 		}
 	}
 
-	async getTableSchema(configId: string, tableName: string, databaseName?: string): Promise<QueryResult> {
-		return await this.executeQuery(configId, `DESCRIBE ${tableName}`, databaseName);
+	async getTableSchema(configId: string, tableName: string, databaseName?: string, _dbHostOverride?: string | undefined, hostOverride?: string, portOverride?: number): Promise<QueryResult> {
+		return await this.executeQuery(configId, `DESCRIBE ${tableName}`, databaseName, hostOverride, portOverride);
 	}
 
-	async listTables(configId: string, databaseName?: string): Promise<string[]> {
-		const result = await this.executeQuery(configId, 'SHOW TABLES', databaseName);
+	async listTables(configId: string, databaseName?: string, hostOverride?: string, portOverride?: number): Promise<string[]> {
+		const result = await this.executeQuery(configId, 'SHOW TABLES', databaseName, hostOverride, portOverride);
 		return result.rows.map((row) => Object.values(row)[0] as string);
 	}
 }

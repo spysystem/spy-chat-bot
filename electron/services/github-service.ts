@@ -179,7 +179,7 @@ export class GitHubService {
 		}
 	}
 
-	async getFileContent(filePath: string): Promise<string> {
+	async getFileContent(filePath: string, _githubBranchOverride: string | undefined, branchOverride?: string): Promise<string> {
 		if (!this.config) {
 			const config = await this.getConfig();
 			if (!config) {
@@ -190,8 +190,9 @@ export class GitHubService {
 
 		try {
 			const encodedPath = encodeURIComponent(filePath).replace(/%2F/g, '/');
+			const ref         = branchOverride ?? this.config.branch;
 			const data        = await this.githubRequest(
-				`/repos/${this.config.owner}/${this.config.repo}/contents/${encodedPath}?ref=${this.config.branch}`,
+				`/repos/${this.config.owner}/${this.config.repo}/contents/${encodedPath}?ref=${ref}`,
 			);
 
 			if (Array.isArray(data) || data.type !== 'file') {
@@ -206,7 +207,7 @@ export class GitHubService {
 		}
 	}
 
-	async listFiles(directoryPath: string = ''): Promise<Array<{ path: string; type: 'file' | 'dir' }>> {
+	async listFiles(directoryPath: string = '', branchOverride?: string): Promise<Array<{ path: string; type: 'file' | 'dir' }>> {
 		if (!this.config) {
 			const config = await this.getConfig();
 			if (!config) {
@@ -217,8 +218,9 @@ export class GitHubService {
 
 		try {
 			const encodedPath = directoryPath ? encodeURIComponent(directoryPath).replace(/%2F/g, '/') : '';
+			const ref         = branchOverride ?? this.config.branch;
 			const data        = await this.githubRequest(
-				`/repos/${this.config.owner}/${this.config.repo}/contents/${encodedPath}?ref=${this.config.branch}`,
+				`/repos/${this.config.owner}/${this.config.repo}/contents/${encodedPath}?ref=${ref}`,
 			);
 
 			if (!Array.isArray(data)) {
@@ -235,7 +237,7 @@ export class GitHubService {
 		}
 	}
 
-	async getTree(recursive: boolean = false): Promise<Array<{ path: string; type: string }>> {
+	async getTree(recursive: boolean = false, branchOverride?: string): Promise<Array<{ path: string; type: string }>> {
 		if (!this.config) {
 			const config = await this.getConfig();
 			if (!config) {
@@ -245,9 +247,10 @@ export class GitHubService {
 		}
 
 		try {
+			const branch     = branchOverride ?? this.config.branch;
 			// Get the latest commit SHA for the branch
 			const branchData = await this.githubRequest(
-				`/repos/${this.config.owner}/${this.config.repo}/branches/${this.config.branch}`,
+				`/repos/${this.config.owner}/${this.config.repo}/branches/${branch}`,
 			);
 
 			const treeSha = branchData.commit.commit.tree.sha;

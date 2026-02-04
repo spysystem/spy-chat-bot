@@ -1,8 +1,8 @@
-import {useState, useEffect, useRef, JSX} from 'react';
+import {useState, useEffect, useMemo, useRef, JSX} from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
-import type {AttachmentMeta, Message, DatabaseConfig} from '../types';
+import type {AttachmentMeta, Message, DatabaseConfig, SystemDirectorySystem, ChatUpdate} from '../types';
 import type {Chat} from '../types';
 import './ChatView.css';
 import 'highlight.js/styles/github-dark.css';
@@ -28,10 +28,50 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 	const [expandedMessageMap, setExpandedMessageMap]     = useState<Map<number, boolean>>(new Map());
 	const [selectedChat, setSelectedChat]                 = useState<Chat | null>(null);
 	const [githubBranch, setGithubBranch]                 = useState<string>('');
-	const messagesEndReference                            = useRef<HTMLDivElement>(null);
-	const previousChatIdReference                         = useRef<string>(chatId);
-	const textareaReference                               = useRef<HTMLTextAreaElement>(null);
-	const fileInputReference                              = useRef<HTMLInputElement>(null);
+
+	// System selector state (per chat)
+	const [systems, setSystems]                     = useState<SystemDirectorySystem[]>([]);
+	const [systemsLoading, setSystemsLoading]       = useState<boolean>(false);
+	const [systemsError, setSystemsError]           = useState<string>('');
+	const [systemSearch, setSystemSearch]           = useState<string>('');
+	const [showSystemResults, setShowSystemResults] = useState<boolean>(false);
+	const [filterActive, setFilterActive]           = useState<boolean>(true);
+	const [filterRestore, setFilterRestore]         = useState<boolean>(false);
+	const [filterDev, setFilterDev]                 = useState<boolean>(false);
+
+	const systemSelectorReference = useRef<HTMLDivElement>(null);
+	const messagesEndReference    = useRef<HTMLDivElement>(null);
+	const previousChatIdReference = useRef<string>(chatId);
+	const textareaReference       = useRef<HTMLTextAreaElement>(null);
+	const fileInputReference      = useRef<HTMLInputElement>(null);
+
+	const DEV_SQL_HOST = 'dev2.spysystem.dk';
+
+	const getDraftStorageKey = (id: string): string => `chat_draft_${id}`;
+
+	const loadDraft = (id: string): string => {
+		try {
+			return localStorage.getItem(getDraftStorageKey(id)) ?? '';
+		} catch {
+			return '';
+		}
+	};
+
+	const saveDraft = (id: string, value: string): void => {
+		try {
+			localStorage.setItem(getDraftStorageKey(id), value);
+		} catch {
+			// Ignore storage failures (e.g., disabled storage, quota issues).
+		}
+	};
+
+	const clearDraft = (id: string): void => {
+		try {
+			localStorage.removeItem(getDraftStorageKey(id));
+		} catch {
+			// Ignore storage failures.
+		}
+	};
 
 	useEffect(() => {
 		async function initialize() {
@@ -61,6 +101,27 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 	}, [chatId]);
 
 	useEffect(() => {
+		// Restore any unsent draft text for this chat.
+		const draft = loadDraft(chatId);
+		if (draft && draft.trim() !== '') {
+			setInputValue(draft);
+		}
+	}, [chatId]);
+
+	useEffect(() => {
+		// Persist drafts so navigation/chat switching doesn't lose unsent text.
+		const handle = setTimeout(() => {
+			if (inputValue.trim() === '') {
+				clearDraft(chatId);
+				return;
+			}
+			saveDraft(chatId, inputValue);
+		}, 150);
+
+		return () => clearTimeout(handle);
+	}, [chatId, inputValue]);
+
+	useEffect(() => {
 		// Load chat messages when chatId changes or on mount
 		async function loadChatData() {
 			const chat = await window.electronAPI.getChat(chatId);
@@ -77,21 +138,73 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 				setAttachmentError('');
 
 				// Set the database name for this chat
-				if (chat.databaseName) {
-					setDatabaseName(chat.databaseName);
-				} else {
-					setDatabaseName('');
-				}
+				setDatabaseName(chat.databaseName ?? '');
+				setSystemSearch(chat.systemName ?? '');
+				setFilterDev(!!chat.isDevMode);
+				setFilterRestore(!!chat.isRestore);
+				setFilterActive(!chat.isRestore);
 			} else {
 				setMessages([]);
 				setExpandedMessageMap(new Map());
 				setDatabaseName('');
+				setSystemSearch('');
+				setFilterDev(false);
+				setFilterRestore(false);
+				setFilterActive(true);
 			}
 		}
 
 		loadChatData();
 		previousChatIdReference.current = chatId;
 	}, [chatId]);
+
+	useEffect(() => {
+		const handler = (event: MouseEvent) => {
+			const el = systemSelectorReference.current;
+			if (!el) {
+				return;
+			}
+			if (event.target instanceof Node && el.contains(event.target)) {
+				return;
+			}
+			setShowSystemResults(false);
+		};
+
+		// Use capture so it triggers even if a click is stopped.
+		window.addEventListener('mousedown', handler, {capture: true});
+		return () => window.removeEventListener('mousedown', handler, {capture: true} as any);
+	}, []);
+
+	useEffect(() => {
+		let cancelled = false;
+
+		async function loadSystems(): Promise<void> {
+			if (filterDev) {
+				return;
+			}
+			setSystemsError('');
+			setSystemsLoading(true);
+			try {
+				const list = await window.electronAPI.getSystems(['active', 'restore']);
+				if (!cancelled) {
+					setSystems(list);
+				}
+			} catch (error) {
+				if (!cancelled) {
+					setSystemsError(error instanceof Error ? error.message : String(error));
+				}
+			} finally {
+				if (!cancelled) {
+					setSystemsLoading(false);
+				}
+			}
+		}
+
+		loadSystems();
+		return () => {
+			cancelled = true;
+		};
+	}, [filterDev, chatId]);
 
 	useEffect(() => {
 		messagesEndReference.current?.scrollIntoView({behavior: 'smooth'});
@@ -109,8 +222,7 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 		}
 	}, [hasApiKey, isInitialized]);
 
-	async function saveDatabaseNameOnly(): Promise<void> {
-		// Convert current messages to storage format
+	async function saveChatUpdate(update: ChatUpdate): Promise<void> {
 		const messagesToSave = messages.map((m) => ({
 			role           : m.role,
 			content        : m.content,
@@ -118,8 +230,11 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 			timestamp      : m.timestamp.toISOString(),
 			attachments    : m.attachments,
 		}));
-
-		await window.electronAPI.updateChat(chatId, messagesToSave, undefined, databaseName, selectedChat?.branch);
+		await window.electronAPI.updateChat(chatId, messagesToSave, update);
+		// Refresh from disk to ensure UI always reflects persisted chat state.
+		const refreshed = await window.electronAPI.getChat(chatId);
+		setSelectedChat(refreshed);
+		onChatUpdate();
 	}
 
 
@@ -165,8 +280,124 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 			attachments    : m.attachments,
 		}));
 
-		await window.electronAPI.updateChat(chatId, messagesToSave, undefined, databaseName, selectedChat?.branch);
+		await window.electronAPI.updateChat(chatId, messagesToSave);
 		onChatUpdate();
+	}
+
+	function releaseToBranch(release: unknown): string | null {
+		const value = String(release ?? '').trim();
+		if (!value) {
+			return null;
+		}
+
+		// 202512.1 -> 2025_12_10
+		const fullMatch = value.match(/^(\d{4})(\d{2})\.(\d+)$/);
+		if (fullMatch) {
+			const [, year, month, patchRaw] = fullMatch;
+			// If the patch part is a single digit (e.g. "1"), treat it as tens ("10").
+			// This matches the SPY git branch naming convention.
+			const patchNum   = Number.parseInt(patchRaw, 10);
+			const patchValue = Number.isFinite(patchNum)
+				? (patchRaw.length === 1 ? patchNum * 10 : patchNum)
+				: patchRaw;
+			const patch      = String(patchValue).padStart(2, '0');
+			return `${year}_${month}_${patch}`;
+		}
+
+		// 202512 -> 2025_12
+		const shortMatch = value.match(/^(\d{4})(\d{2})$/);
+		if (shortMatch) {
+			const [, year, month] = shortMatch;
+			return `${year}_${month}`;
+		}
+
+		return null;
+	}
+
+	const filteredSystems = useMemo(() => {
+		if (filterDev) {
+			return [];
+		}
+
+		const needle = systemSearch.trim().toLowerCase();
+		return systems
+			.filter((s) => {
+				const matchesActive  = filterActive && !s.isDev && !s.isRestore;
+				const matchesRestore = filterRestore && s.isRestore;
+				return matchesActive || matchesRestore;
+			})
+			.filter((s) => {
+				if (!needle) {
+					return true;
+				}
+				return (
+					s.name.toLowerCase().includes(needle) ||
+					s.systemKey.toLowerCase().includes(needle) ||
+					s.databaseName.toLowerCase().includes(needle) ||
+					s.serverHost.toLowerCase().includes(needle)
+				);
+			})
+	}, [filterActive, filterRestore, filterDev, systemSearch, systems]);
+
+	async function selectSystem(system: SystemDirectorySystem): Promise<void> {
+		const branch = releaseToBranch(system.release) ?? undefined;
+		setSystemSearch(system.name);
+		setDatabaseName(system.databaseName);
+		setShowSystemResults(false);
+		await saveChatUpdate({
+			systemKey   : system.systemKey,
+			systemName  : system.name,
+			dbHost      : system.serverHost,
+			release     : system.release,
+			isRestore   : system.isRestore,
+			isDevMode   : false,
+			databaseName: system.databaseName,
+			branch,
+		});
+	}
+
+	function setSystemFilterMode(mode: 'active' | 'restore'): void {
+		setFilterActive(mode === 'active');
+		setFilterRestore(mode === 'restore');
+	}
+
+	async function toggleDevMode(next: boolean): Promise<void> {
+		setFilterDev(next);
+		if (next) {
+			setFilterActive(false);
+			setFilterRestore(false);
+		} else {
+			setFilterActive(true);
+			setFilterRestore(false);
+		}
+		setShowSystemResults(false);
+		if (next) {
+			await saveChatUpdate({
+				isDevMode: true,
+				dbHost   : DEV_SQL_HOST,
+				// Keep branch as-is (dev DB doesn't imply a code branch)
+				systemKey : '',
+				systemName: 'Dev',
+				release   : '',
+				isRestore : false,
+			});
+		} else {
+			await saveChatUpdate({
+				isDevMode: false,
+				// Keep previous selection until user chooses a system.
+			});
+		}
+	}
+
+	async function saveDevDatabaseNameOnly(): Promise<void> {
+		if (!filterDev) {
+			return;
+		}
+		await saveChatUpdate({
+			isDevMode   : true,
+			dbHost      : DEV_SQL_HOST,
+			databaseName: databaseName.trim(),
+		});
 	}
 
 	function toBase64(buffer: ArrayBuffer): string {
@@ -219,9 +450,10 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 			return;
 		}
 
+		const messageText          = inputValue;
 		const userMessage: Message = {
 			role       : 'user',
-			content    : inputValue,
+			content    : messageText,
 			timestamp  : new Date(),
 			attachments: pendingAttachments.length > 0 ? pendingAttachments : undefined,
 		};
@@ -229,6 +461,7 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 		const newMessages = [...messages, userMessage];
 		setMessages(newMessages);
 		setInputValue('');
+		clearDraft(chatId);
 		setPendingAttachments([]);
 		setIsLoading(true);
 		setProgressStatus('Preparing...');
@@ -245,16 +478,27 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 				content: m.content,
 			}));
 
-			// If connection and database name are provided, use them for database queries
-			const databaseIds = connection && databaseName.trim() ? [connection.id] : [];
-			const dbName      = databaseName.trim() || undefined;
+			const effectiveDatabaseName = databaseName.trim() || undefined;
+			const effectiveDbHost       = selectedChat?.dbHost && selectedChat.dbHost.trim() !== ''
+				? selectedChat.dbHost.trim()
+				: (filterDev ? DEV_SQL_HOST : undefined);
+			const effectiveGithubBranch = selectedChat?.branch && selectedChat.branch.trim() !== ''
+				? selectedChat.branch.trim()
+				: undefined;
+
+			// If connection + database are provided, enable database tools.
+			const databaseIds = connection && effectiveDatabaseName ? [connection.id] : [];
 
 			const response = await window.electronAPI.sendMessage(
 				chatId,
-				inputValue,
+				messageText,
 				databaseIds,
 				conversationHistory,
-				dbName,
+				{
+					databaseName: effectiveDatabaseName,
+					dbHost      : effectiveDbHost,
+					githubBranch: effectiveGithubBranch,
+				},
 				pendingAttachments,
 			);
 
@@ -269,7 +513,18 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 
 			const finalMessages = [...newMessages, assistantMessage];
 			setMessages(finalMessages);
-			await saveMessages(finalMessages);
+			// Persist messages + (optional) AI suggested title.
+			const messagesToSave = finalMessages.map((m) => ({
+				role           : m.role,
+				content        : m.content,
+				detailedContent: m.detailedContent,
+				timestamp      : m.timestamp.toISOString(),
+				attachments    : m.attachments,
+			}));
+			await window.electronAPI.updateChat(chatId, messagesToSave, response.suggestedTitle ? {title: response.suggestedTitle} : undefined);
+			const refreshed = await window.electronAPI.getChat(chatId);
+			setSelectedChat(refreshed);
+			onChatUpdate();
 		} catch (error) {
 			const errorMessage: Message = {
 				role     : 'assistant',
@@ -318,6 +573,9 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 
 	return (
 		<div className="chat-view">
+			<div className="chat-title-bar">
+				<div className="chat-title">{selectedChat?.title || 'New Chat'}</div>
+			</div>
 			<div className="badge-container">
 				{(selectedChat?.branch || githubBranch) && (
 					<div className="branch-badge">
@@ -325,27 +583,125 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 						<span className="branch-name">{selectedChat?.branch || githubBranch}</span>
 					</div>
 				)}
-				{connection?.host && (
+				{(selectedChat?.dbHost || connection?.host) && (
 					<div className="server-badge">
 						<span className="server-icon">🖥️</span>
-						<span className="server-name">{getServerDisplayName(connection.host)}</span>
+						<span className="server-name">{getServerDisplayName(selectedChat?.dbHost || connection!.host)}</span>
 					</div>
 				)}
 			</div>
-			{connection && (
-				<div className="database-selector">
-					<label htmlFor="database-name">Database (optional):</label>
-					<input
-						id="database-name"
-						type="text"
-						value={databaseName}
-						onChange={(event) => setDatabaseName(event.target.value)}
-						onBlur={saveDatabaseNameOnly}
-						className="database-input"
-						placeholder="Enter database name or leave empty"
-					/>
+
+			<div className="system-selector" ref={systemSelectorReference}>
+				<div className="system-selector-row">
+					<label htmlFor="system-search">System:</label>
+					<div className="system-search-wrapper">
+						<input
+							id="system-search"
+							type="text"
+							value={systemSearch}
+							onChange={(event) => {
+								setSystemSearch(event.target.value);
+								setShowSystemResults(true);
+							}}
+							onFocus={() => setShowSystemResults(true)}
+							className="system-search-input"
+							placeholder={filterDev ? 'Dev mode enabled' : 'Search customer/system (name, key, DB, host)'}
+							disabled={filterDev}
+						/>
+
+						{!filterDev && showSystemResults && (
+							<div className="system-results">
+								{systemsLoading && (
+									<div className="system-results-row">Loading systems…</div>
+								)}
+								{systemsError && (
+									<div className="system-results-row system-results-error">⚠ {systemsError}</div>
+								)}
+								{!systemsLoading && !systemsError && filteredSystems.length === 0 && (
+									<div className="system-results-row">No matches.</div>
+								)}
+								{filteredSystems.map((s) => (
+									<button
+										type="button"
+										key={s.systemKey}
+										className="system-result-item"
+										onMouseDown={(e) => {
+											// Select on mousedown so blur/click timing never cancels selection.
+											e.preventDefault();
+											e.stopPropagation();
+											void selectSystem(s);
+										}}
+										onClick={(e) => e.preventDefault()}
+										title={`${s.systemKey} • ${s.databaseName} • ${s.serverHost} • ${s.release ?? ''}`}
+									>
+										<div className="system-result-main">
+											<div className="system-result-name">{s.name}</div>
+											<div className="system-result-meta">{s.databaseName} @ {getServerDisplayName(s.serverHost)}</div>
+										</div>
+										<div className="system-result-release">{s.release ?? ''}</div>
+									</button>
+								))}
+							</div>
+						)}
+					</div>
+
+					<div className="system-filters">
+						<label className={`system-checkbox ${filterActive ? 'checked' : ''}`}>
+							<input
+								type="checkbox"
+								checked={filterActive}
+								onChange={(e) => {
+									if (e.target.checked) {
+										setSystemFilterMode('active');
+									}
+								}}
+								disabled={filterDev}
+							/>
+							<span>Active</span>
+						</label>
+						<label className={`system-checkbox ${filterRestore ? 'checked' : ''}`}>
+							<input
+								type="checkbox"
+								checked={filterRestore}
+								onChange={(e) => {
+									if (e.target.checked) {
+										setSystemFilterMode('restore');
+									}
+								}}
+								disabled={filterDev}
+							/>
+							<span>Restore</span>
+						</label>
+						<label className={`system-checkbox ${filterDev ? 'checked' : ''}`}>
+							<input
+								type="checkbox"
+								checked={filterDev}
+								onChange={(e) => void toggleDevMode(e.target.checked)}
+							/>
+							<span>Dev</span>
+						</label>
+					</div>
 				</div>
-			)}
+
+				{filterDev && (
+					<div className="system-selector-row">
+						<label htmlFor="dev-database-name">Database:</label>
+						<input
+							id="dev-database-name"
+							type="text"
+							value={databaseName}
+							onChange={(event) => setDatabaseName(event.target.value)}
+							onBlur={saveDevDatabaseNameOnly}
+							className="system-search-input"
+							placeholder="Enter database name"
+						/>
+						<div className="system-dev-host">
+							Host: <span className="system-dev-host-value">{DEV_SQL_HOST}</span>
+						</div>
+					</div>
+				)}
+
+			</div>
 
 			<div className="messages">
 				{messages.length === 0 && (

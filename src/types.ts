@@ -26,6 +26,7 @@ export interface AttachmentMeta {
 }
 
 export interface Chat {
+	systemName: string;
 	id: string;
 	title: string;
 	messages: Array<{
@@ -35,6 +36,11 @@ export interface Chat {
 		timestamp: string;
 		attachments?: AttachmentMeta[];
 	}>;
+	systemKey?: string;
+	dbHost?: string;
+	release?: string;
+	isRestore?: boolean;
+	isDevMode?: boolean;
 	databaseName?: string;
 	branch?: string;
 	workingSummary?: {
@@ -43,6 +49,39 @@ export interface Chat {
 	};
 	createdAt: string;
 	updatedAt: string;
+}
+
+export interface ChatUpdate {
+	title?: string;
+	databaseName?: string;
+	branch?: string;
+	systemKey?: string;
+	systemName?: string;
+	dbHost?: string;
+	release?: string;
+	isRestore?: boolean;
+	isDevMode?: boolean;
+}
+
+export interface SystemDirectorySystem {
+	name: string;
+	systemKey: string;
+	project?: string;
+	inSystems?: boolean;
+	isDev: boolean;
+	isRestore: boolean;
+	release?: string;
+	targetRelease?: string;
+	nextRelease?: string;
+	systemPath?: string;
+	systemUrl?: string;
+	systemUrlWithProtocol?: string;
+	systemUrlAlias?: string;
+	databaseName: string;
+	backupDatabaseName?: string;
+	serverHost: string;
+	allowSystemDelete?: boolean;
+	allowDatabaseDelete?: boolean;
 }
 
 export interface GitHubConfig {
@@ -73,6 +112,7 @@ declare global {
 			saveDatabaseConfig: (config: DatabaseConfig) => Promise<void>;
 			getDatabaseConfigs: () => Promise<DatabaseConfig[]>;
 			deleteDatabaseConfig: (id: string) => Promise<void>;
+			getSystems: (statuses?: string[]) => Promise<SystemDirectorySystem[]>;
 			getSchemaIndexStatus: (configId: string) => Promise<SchemaIndexStatus>;
 			generateSchemaIndex: (configId: string, databaseName: string) => Promise<SchemaIndexStatus>;
 			onSchemaIndexProgress: (callback: (progress: SchemaIndexProgress) => void) => () => void;
@@ -84,7 +124,11 @@ declare global {
 			sendMessage: (chatId: string, message: string, databases: string[], history?: Array<{
 				role: string;
 				content: string
-			}>, databaseName?: string, attachments?: AttachmentMeta[]) => Promise<{ shortAnswer: string; detailedAnswer: string }>;
+			}>, chatContext?: { databaseName?: string; dbHost?: string; githubBranch?: string }, attachments?: AttachmentMeta[]) => Promise<{
+				shortAnswer: string;
+				detailedAnswer: string;
+				suggestedTitle?: string;
+			}>;
 			getApiKey: () => Promise<string | null>;
 			saveApiKey: (apiKey: string) => Promise<void>;
 			getChats: () => Promise<Chat[]>;
@@ -95,7 +139,7 @@ declare global {
 				content: string;
 				detailedContent?: string;
 				timestamp: string
-			}>, title?: string, databaseName?: string, branch?: string) => Promise<void>;
+			}>, update?: ChatUpdate) => Promise<void>;
 			deleteChat: (chatId: string) => Promise<void>;
 			setWorkingSummary: (chatId: string, text: string) => Promise<void>;
 			clearWorkingSummary: (chatId: string) => Promise<void>;

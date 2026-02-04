@@ -11,6 +11,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
 	getDatabaseConfigs: () =>
 		ipcRenderer.invoke('get-database-configs'),
 
+	// Systems directory (customer/system list)
+	getSystems: (statuses?: string[]) =>
+		ipcRenderer.invoke('get-systems', statuses),
+
 	// Schema index
 	getSchemaIndexStatus: (configId: string) =>
 		ipcRenderer.invoke('get-schema-index-status', configId),
@@ -52,8 +56,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
 	openAttachment: (storedPath: string) =>
 		ipcRenderer.invoke('open-attachment', storedPath),
 
-	sendMessage: (chatId: string, message: string, databases: string[], history?: Array<{ role: string; content: string }>, databaseName?: string, attachments?: any[]) =>
-		ipcRenderer.invoke('send-message', chatId, message, databases, history, databaseName, attachments),
+	sendMessage: (
+		chatId: string,
+		message: string,
+		databases: string[],
+		history?: Array<{ role: string; content: string }>,
+		chatContext?: { databaseName?: string; dbHost?: string; githubBranch?: string },
+		attachments?: any[],
+	) =>
+		ipcRenderer.invoke('send-message', chatId, message, databases, history, chatContext, attachments),
 
 	getApiKey: () =>
 		ipcRenderer.invoke('get-api-key'),
@@ -71,8 +82,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
 	createChat: (title?: string) =>
 		ipcRenderer.invoke('create-chat', title),
 
-	updateChat: (chatId: string, messages: any[], title?: string, databaseName?: string, branch?: string) =>
-		ipcRenderer.invoke('update-chat', chatId, messages, title, databaseName, branch),
+	updateChat: (chatId: string, messages: any[], update?: any) =>
+		ipcRenderer.invoke('update-chat', chatId, messages, update),
 
 	deleteChat: (chatId: string) =>
 		ipcRenderer.invoke('delete-chat', chatId),
