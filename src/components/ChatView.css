@@ -68,15 +68,35 @@
 	font-size: 14px;
 	font-weight: 500;
 	transition: all 0.2s ease;
-	width: 100%;
-	max-width: 100%;
-	flex: 0 0 auto;
+	flex: 1;
+	min-width: 0;
 }
 
 .system-search-wrapper {
 	position: relative;
 	width: 420px;
 	max-width: 100%;
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.system-url-link {
+	font-size: 20px;
+	filter: grayscale(100%) brightness(2);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	flex-shrink: 0;
+	background: none;
+	border: none;
+	padding: 0;
+	cursor: pointer;
+	transition: opacity 0.2s ease;
+}
+
+.system-url-link:hover {
+	opacity: 0.7;
 }
 
 .system-search-input:focus {
@@ -671,11 +691,13 @@
 	font-size: 15px;
 	resize: none;
 	min-height: 56px;
-	max-height: 200px;
-	transition: all 0.2s ease;
+	max-height: 300px;
+	transition: border-color 0.2s ease, box-shadow 0.2s ease;
 	background: var(--bg-primary);
 	color: var(--text-primary);
 	line-height: 1.5;
+	overflow-y: auto;
+	overflow-x: hidden;
 }
 
 .input-area textarea:focus {

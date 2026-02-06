@@ -6,6 +6,7 @@ import {ConfirmModal} from './components/ConfirmModal';
 import {UpdateModal} from './components/UpdateModal';
 import {useTheme} from './ThemeContext';
 import type {Chat} from './types';
+import {AiStreamProvider, useAiStreams} from './ai/AiStreamContext';
 import './App.css';
 
 type View = 'chat' | 'settings' | 'debug';
@@ -14,19 +15,6 @@ export function App(): JSX.Element {
 	const {theme, toggleTheme}              = useTheme();
 	// Check if URL hash is #debug to show debug view
 	const initialView                       = window.location.hash === '#debug' ? 'debug' : 'chat';
-	const [currentView, setCurrentView]     = useState<View>(initialView);
-	const [chats, setChats]                 = useState<Chat[]>([]);
-	const [currentChatId, setCurrentChatId] = useState<string | null>(null);
-	const [chatToDelete, setChatToDelete]   = useState<string | null>(null);
-
-	// Update modal state
-	const [showUpdateModal, setShowUpdateModal]     = useState(false);
-	const [updateVersion, setUpdateVersion]         = useState('');
-	const [updateDownloading, setUpdateDownloading] = useState(false);
-	const [updateProgress, setUpdateProgress]       = useState(0);
-	const [updateReady, setUpdateReady]             = useState(false);
-	const [updateError, setUpdateError]             = useState<string | undefined>();
-	const [forceUpdate]                             = useState(true);
 
 	// Check if electronAPI is available
 	if (!window.electronAPI) {
@@ -40,6 +28,30 @@ export function App(): JSX.Element {
 			</div>
 		);
 	}
+
+	return (
+		<AiStreamProvider>
+			<AppWithStreams theme={theme} toggleTheme={toggleTheme} initialView={initialView}/>
+		</AiStreamProvider>
+	);
+}
+
+function AppWithStreams(props: { theme: string; toggleTheme: () => void; initialView: View }): JSX.Element {
+	const {theme, toggleTheme, initialView}          = props;
+	const {isChatRunning}                            = useAiStreams();
+	const [currentView, setCurrentView]              = useState<View>(initialView);
+	const [chats, setChats]                          = useState<Chat[]>([]);
+	const [currentChatId, setCurrentChatId]          = useState<string | null>(null);
+	const [chatToDelete, setChatToDelete]            = useState<string | null>(null);
+
+	// Update modal state
+	const [showUpdateModal, setShowUpdateModal]      = useState(false);
+	const [updateVersion, setUpdateVersion]          = useState('');
+	const [updateDownloading, setUpdateDownloading]  = useState(false);
+	const [updateProgress, setUpdateProgress]        = useState(0);
+	const [updateReady, setUpdateReady]              = useState(false);
+	const [updateError, setUpdateError]              = useState<string | undefined>();
+	const [forceUpdate]                              = useState(true);
 
 	useEffect(() => {
 		loadChats();
@@ -198,59 +210,64 @@ export function App(): JSX.Element {
 
 	return (
 		<div className="app">
-			<div className="sidebar">
-				<h1>SPØRGE JØRGEN</h1>
+			{currentView !== 'debug' && (
+				<div className="sidebar">
+					<h1>SPØRGE JØRGEN</h1>
 
-				<button className="new-chat-btn" onClick={createNewChat}>
-					+ New Chat
-				</button>
+					<button className="new-chat-btn" onClick={createNewChat}>
+						+ New Chat
+					</button>
 
-				<div className="chat-list">
-					<div className="chat-list-header">Chats</div>
-					{chats.map((chat) => (
-						<div
-							key={chat.id}
-							className={`chat-item ${currentChatId === chat.id ? 'active' : ''}`}
-							onClick={() => selectChat(chat.id)}
-						>
-							<div className="chat-item-content">
-								<div className="chat-item-title">{chat.title}</div>
-								<div className="chat-item-date">
-									{new Date(chat.updatedAt).toLocaleDateString()}
-								</div>
-							</div>
-							<button
-								className="chat-item-delete"
-								onClick={(event) => {
-									event.stopPropagation();
-									openDeleteModal(chat.id);
-								}}
-								title="Delete chat"
+					<div className="chat-list">
+						<div className="chat-list-header">Chats</div>
+						{chats.map((chat) => (
+							<div
+								key={chat.id}
+								className={`chat-item ${currentChatId === chat.id ? 'active' : ''}`}
+								onClick={() => selectChat(chat.id)}
 							>
-								🗑️
-							</button>
-						</div>
-					))}
-				</div>
+								{isChatRunning(chat.id) && (
+									<div className="chat-item-spinner" title="AI is working"/>
+								)}
+								<div className="chat-item-content">
+									<div className="chat-item-title">{chat.title}</div>
+									<div className="chat-item-date">
+										{new Date(chat.updatedAt).toLocaleDateString()}
+									</div>
+								</div>
+								<button
+									className="chat-item-delete"
+									onClick={(event) => {
+										event.stopPropagation();
+										openDeleteModal(chat.id);
+									}}
+									title="Delete chat"
+								>
+									🗑️
+								</button>
+							</div>
+						))}
+					</div>
 
-				<nav className="sidebar-nav">
-					<button
-						className={currentView === 'chat' ? 'active' : ''}
-						onClick={() => setCurrentView('chat')}
-					>
-						💬 Chat
-					</button>
-					<button
-						className={currentView === 'settings' ? 'active' : ''}
-						onClick={() => setCurrentView('settings')}
-					>
-						⚙️ Settings
-					</button>
-					<button onClick={toggleTheme}>
-						{theme === 'dark' ? '☀️' : '🌙'} {theme === 'dark' ? 'Light Mode' : 'Dark Mode'}
-					</button>
-				</nav>
-			</div>
+					<nav className="sidebar-nav">
+						<button
+							className={currentView === 'chat' ? 'active' : ''}
+							onClick={() => setCurrentView('chat')}
+						>
+							💬 Chat
+						</button>
+						<button
+							className={currentView === 'settings' ? 'active' : ''}
+							onClick={() => setCurrentView('settings')}
+						>
+							⚙️ Settings
+						</button>
+						<button onClick={toggleTheme}>
+							{theme === 'dark' ? '☀️' : '🌙'} {theme === 'dark' ? 'Light Mode' : 'Dark Mode'}
+						</button>
+					</nav>
+				</div>
+			)}
 
 			<div className="main-content">
 				{currentView === 'chat' && currentChatId && (

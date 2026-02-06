@@ -43,6 +43,7 @@ export interface Chat {
 	isDevMode?: boolean;
 	databaseName?: string;
 	branch?: string;
+	systemUrl?: string;
 	workingSummary?: {
 		text: string;
 		updatedAt: string;
@@ -61,6 +62,7 @@ export interface ChatUpdate {
 	release?: string;
 	isRestore?: boolean;
 	isDevMode?: boolean;
+	systemUrl?: string;
 }
 
 export interface SystemDirectorySystem {
@@ -105,6 +107,19 @@ export interface SchemaIndexStatus {
 	source?: 'information_schema' | 'describe_fallback';
 }
 
+export interface LocalRepoStatus {
+	exists: boolean;
+	repoPath: string;
+	lastSyncIso?: string;
+	url?: string;
+}
+
+export interface LocalRepoSyncProgress {
+	stage: string;
+	percent?: number;
+	message?: string;
+}
+
 declare global {
 	interface Window {
 		electronAPI: {
@@ -129,6 +144,19 @@ declare global {
 				detailedAnswer: string;
 				suggestedTitle?: string;
 			}>;
+			startAiStream: (chatId: string, message: string, databases: string[], history?: Array<{
+				role: string;
+				content: string;
+			}>, chatContext?: { databaseName?: string; dbHost?: string; githubBranch?: string }, attachments?: AttachmentMeta[]) => Promise<{
+				streamId: string;
+			}>;
+			stopAiStream: (streamId: string) => Promise<void>;
+			onAiEvent: (callback: (payload: { streamId: string; event: any }) => void) => () => void;
+			onAiStreamFinished: (callback: (payload: {
+				streamId: string;
+				result: { shortAnswer: string; detailedAnswer: string; suggestedTitle?: string };
+			}) => void) => () => void;
+			onAiStreamError: (callback: (payload: { streamId: string; error: string }) => void) => () => void;
 			getApiKey: () => Promise<string | null>;
 			saveApiKey: (apiKey: string) => Promise<void>;
 			getChats: () => Promise<Chat[]>;
@@ -143,14 +171,20 @@ declare global {
 			deleteChat: (chatId: string) => Promise<void>;
 			setWorkingSummary: (chatId: string, text: string) => Promise<void>;
 			clearWorkingSummary: (chatId: string) => Promise<void>;
-			onMessageProgress: (callback: (status: string) => void) => () => void;
+			onMessageProgress: (callback: (payload: { chatId: string; streamId: string; status: string } | string) => void) => () => void;
 			getGitHubConfig: () => Promise<GitHubConfig | null>;
 			saveGitHubConfig: (config: GitHubConfig) => Promise<void>;
 			validateGitHubConfig: () => Promise<{ valid: boolean; error?: string; user?: string }>;
+			getLocalRepoStatus: () => Promise<LocalRepoStatus>;
+			syncLocalRepo: (url: string) => Promise<{ success: boolean; repoPath?: string; error?: string }>;
+			onLocalRepoSyncProgress: (callback: (progress: LocalRepoSyncProgress) => void) => () => void;
+			checkGitInstalled: () => Promise<{ installed: boolean; version: string | null }>;
+			installGit: () => Promise<{ success: boolean }>;
 			getUserName: () => Promise<string | null>;
 			saveUserName: (userName: string) => Promise<void>;
 			openDebugWindow: () => Promise<void>;
 			focusWindow: () => Promise<void>;
+			openExternalUrl: (url: string) => Promise<{ success: boolean; error?: string }>;
 			onDeepLink: (callback: (url: string) => void) => () => void;
 			onDebugLog: (callback: (log: {
 				timestamp: string;

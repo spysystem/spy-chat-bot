@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
 import type {AttachmentMeta, Message, DatabaseConfig, SystemDirectorySystem, ChatUpdate} from '../types';
 import type {Chat} from '../types';
+import {buildStreamAssistantMessage, useAiStreams} from '../ai/AiStreamContext';
 import './ChatView.css';
 import 'highlight.js/styles/github-dark.css';
 
@@ -15,7 +16,7 @@ interface ChatViewProps {
 export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 	const [messages, setMessages]                         = useState<Message[]>([]);
 	const [inputValue, setInputValue]                     = useState('');
-	const [isLoading, setIsLoading]                       = useState(false);
+	const [isSending, setIsSending]                       = useState(false);
 	const [connection, setConnection]                     = useState<DatabaseConfig | null>(null);
 	const [databaseName, setDatabaseName]                 = useState<string>('');
 	const [pendingAttachments, setPendingAttachments]     = useState<AttachmentMeta[]>([]);
@@ -23,7 +24,6 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 	const [attachmentError, setAttachmentError]           = useState<string>('');
 	const [hasApiKey, setHasApiKey]                       = useState(false);
 	const [userName, setUserName]                         = useState<string>('You');
-	const [progressStatus, setProgressStatus]             = useState<string>('');
 	const [isInitialized, setIsInitialized]               = useState(false);
 	const [expandedMessageMap, setExpandedMessageMap]     = useState<Map<number, boolean>>(new Map());
 	const [selectedChat, setSelectedChat]                 = useState<Chat | null>(null);
@@ -39,11 +39,15 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 	const [filterRestore, setFilterRestore]         = useState<boolean>(false);
 	const [filterDev, setFilterDev]                 = useState<boolean>(false);
 
-	const systemSelectorReference = useRef<HTMLDivElement>(null);
-	const messagesEndReference    = useRef<HTMLDivElement>(null);
-	const previousChatIdReference = useRef<string>(chatId);
-	const textareaReference       = useRef<HTMLTextAreaElement>(null);
-	const fileInputReference      = useRef<HTMLInputElement>(null);
+	const systemSelectorReference                               = useRef<HTMLDivElement>(null);
+	const messagesEndReference                                  = useRef<HTMLDivElement>(null);
+	const previousChatIdReference                               = useRef<string>(chatId);
+	const textareaReference                                     = useRef<HTMLTextAreaElement>(null);
+	const fileInputReference                                    = useRef<HTMLInputElement>(null);
+	const {getChatStreamState, startChatStream, stopChatStream} = useAiStreams();
+	const streamState                                           = getChatStreamState(chatId);
+	const isStreamRunning                                       = !!streamState && (streamState.status === 'running' || streamState.status === 'stopping');
+	const progressStatus                                        = streamState?.progressStatus || '';
 
 	const DEV_SQL_HOST = 'dev2.spysystem.dk';
 
@@ -89,15 +93,6 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 		}
 
 		initialize();
-
-		// Setup progress listener
-		const unsubscribe = window.electronAPI.onMessageProgress((status) => {
-			setProgressStatus(status);
-		});
-
-		return () => {
-			unsubscribe();
-		};
 	}, [chatId]);
 
 	useEffect(() => {
@@ -158,6 +153,28 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 		previousChatIdReference.current = chatId;
 	}, [chatId]);
 
+	const previousStreamRunningRef = useRef<boolean>(false);
+	useEffect(() => {
+		const wasRunning                 = previousStreamRunningRef.current;
+		const nowRunning                 = isStreamRunning;
+		previousStreamRunningRef.current = nowRunning;
+		if (wasRunning && !nowRunning) {
+			// Stream finished (or errored/stopped) - refresh messages from disk.
+			void (async () => {
+				const chat = await window.electronAPI.getChat(chatId);
+				setSelectedChat(chat);
+				if (chat) {
+					const loadedMessages = chat.messages.map((m) => ({
+						...m,
+						timestamp: new Date(m.timestamp),
+					}));
+					setMessages(loadedMessages);
+				}
+				onChatUpdate();
+			})();
+		}
+	}, [chatId, isStreamRunning, onChatUpdate]);
+
 	useEffect(() => {
 		const handler = (event: MouseEvent) => {
 			const el = systemSelectorReference.current;
@@ -208,7 +225,7 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 
 	useEffect(() => {
 		messagesEndReference.current?.scrollIntoView({behavior: 'smooth'});
-	}, [messages]);
+	}, [messages, streamState?.partialText]);
 
 	useEffect(() => {
 		// Focus textarea when component is ready and has API key
@@ -221,6 +238,17 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 			});
 		}
 	}, [hasApiKey, isInitialized]);
+
+	useEffect(() => {
+		// Auto-resize textarea based on content
+		const textarea = textareaReference.current;
+		if (textarea) {
+			// Reset height to get accurate scrollHeight
+			textarea.style.height = 'auto';
+			// Set height to scrollHeight (capped by max-height in CSS)
+			textarea.style.height = `${textarea.scrollHeight}px`;
+		}
+	}, [inputValue]);
 
 	async function saveChatUpdate(update: ChatUpdate): Promise<void> {
 		const messagesToSave = messages.map((m) => ({
@@ -353,6 +381,7 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 			isDevMode   : false,
 			databaseName: system.databaseName,
 			branch,
+			systemUrl   : system.systemUrlWithProtocol,
 		});
 	}
 
@@ -446,7 +475,7 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 	}
 
 	async function handleSend(): Promise<void> {
-		if ((!inputValue.trim() && pendingAttachments.length === 0) || isLoading) {
+		if ((!inputValue.trim() && pendingAttachments.length === 0) || isSending || isStreamRunning) {
 			return;
 		}
 
@@ -463,16 +492,12 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 		setInputValue('');
 		clearDraft(chatId);
 		setPendingAttachments([]);
-		setIsLoading(true);
-		setProgressStatus('Preparing...');
-
-		// Save user message immediately
-		await saveMessages(newMessages);
+		setIsSending(true);
 
 		try {
 			// Send only the last 5 messages for context to avoid token limit
 			// (some queries return very large results)
-			const recentMessages      = messages.slice(-5);
+			const recentMessages      = newMessages.slice(-5);
 			const conversationHistory = recentMessages.map((m) => ({
 				role   : m.role,
 				content: m.content,
@@ -488,42 +513,18 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 
 			// If connection + database are provided, enable database tools.
 			const databaseIds = connection && effectiveDatabaseName ? [connection.id] : [];
-
-			const response = await window.electronAPI.sendMessage(
+			await startChatStream({
 				chatId,
-				messageText,
-				databaseIds,
-				conversationHistory,
-				{
+				message    : messageText,
+				databases  : databaseIds,
+				history    : conversationHistory,
+				chatContext: {
 					databaseName: effectiveDatabaseName,
 					dbHost      : effectiveDbHost,
 					githubBranch: effectiveGithubBranch,
 				},
-				pendingAttachments,
-			);
-
-			setProgressStatus('');
-
-			const assistantMessage: Message = {
-				role           : 'assistant',
-				content        : response.shortAnswer,
-				detailedContent: response.detailedAnswer || undefined,
-				timestamp      : new Date(),
-			};
-
-			const finalMessages = [...newMessages, assistantMessage];
-			setMessages(finalMessages);
-			// Persist messages + (optional) AI suggested title.
-			const messagesToSave = finalMessages.map((m) => ({
-				role           : m.role,
-				content        : m.content,
-				detailedContent: m.detailedContent,
-				timestamp      : m.timestamp.toISOString(),
-				attachments    : m.attachments,
-			}));
-			await window.electronAPI.updateChat(chatId, messagesToSave, response.suggestedTitle ? {title: response.suggestedTitle} : undefined);
-			const refreshed = await window.electronAPI.getChat(chatId);
-			setSelectedChat(refreshed);
+				attachments: pendingAttachments,
+			});
 			onChatUpdate();
 		} catch (error) {
 			const errorMessage: Message = {
@@ -536,9 +537,15 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 			setMessages(finalMessages);
 			await saveMessages(finalMessages);
 		} finally {
-			setIsLoading(false);
-			setProgressStatus('');
+			setIsSending(false);
 		}
+	}
+
+	function handleStop(): void {
+		if (!isStreamRunning) {
+			return;
+		}
+		void stopChatStream(chatId);
 	}
 
 	function toggleExpanded(messageIndex: number): void {
@@ -549,6 +556,24 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 			return next;
 		});
 	}
+
+	const isBusy            = isSending || isStreamRunning;
+	const showLoadingBubble = isSending || (isStreamRunning && !(streamState?.hasStreamedContent));
+
+	const displayedMessages = useMemo(() => {
+		const base = [...messages];
+		if (isStreamRunning && streamState?.hasStreamedContent) {
+			base.push(buildStreamAssistantMessage(streamState));
+		}
+		if (streamState?.status === 'error' && streamState.error) {
+			base.push({
+				role     : 'assistant',
+				content  : `Error: ${streamState.error}`,
+				timestamp: new Date(),
+			});
+		}
+		return base;
+	}, [messages, isStreamRunning, streamState?.hasStreamedContent, streamState?.partialText, streamState?.status, streamState?.error]);
 
 	if (!hasApiKey) {
 		return (
@@ -608,6 +633,20 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 							placeholder={filterDev ? 'Dev mode enabled' : 'Search customer/system (name, key, DB, host)'}
 							disabled={filterDev}
 						/>
+						{selectedChat?.systemUrl && (
+							<button
+								onClick={async () => {
+									if (selectedChat.systemUrl) {
+										await window.electronAPI.openExternalUrl(selectedChat.systemUrl);
+									}
+								}}
+								className="system-url-link"
+								title={`Open system: ${selectedChat.systemUrl}`}
+								type="button"
+							>
+								🌐
+							</button>
+						)}
 
 						{!filterDev && showSystemResults && (
 							<div className="system-results">
@@ -711,7 +750,7 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 					</div>
 				)}
 
-				{messages.map((message, index) => {
+				{displayedMessages.map((message, index) => {
 					const hasDetailed = message.role === 'assistant' && !!message.detailedContent && message.detailedContent.trim() !== '' && message.detailedContent.trim() !== message.content.trim();
 					const isExpanded  = expandedMessageMap.get(index) || false;
 					const shownText   = (hasDetailed && isExpanded) ? (message.detailedContent as string) : message.content;
@@ -786,7 +825,7 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 					);
 				})}
 
-				{isLoading && (
+				{showLoadingBubble && (
 					<div className="message assistant">
 						<div className="message-header">
 							<div className="message-avatar">🤖</div>
@@ -855,17 +894,22 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 						}
 					}}
 					placeholder="Ask away!"
-					disabled={isLoading}
+					disabled={isBusy}
 					autoFocus
 				/>
 				<button
 					onClick={() => fileInputReference.current?.click()}
-					disabled={isLoading}
+					disabled={isBusy}
 					className="attach-button"
 				>
 					Attach
 				</button>
-				<button onClick={handleSend} disabled={isLoading || (!inputValue.trim() && pendingAttachments.length === 0)}>
+				{isStreamRunning && (
+					<button onClick={handleStop} className="stop-button">
+						Stop
+					</button>
+				)}
+				<button onClick={handleSend} disabled={isBusy || (!inputValue.trim() && pendingAttachments.length === 0)}>
 					Send
 				</button>
 			</div>

@@ -1,5 +1,5 @@
 import {Fragment, useState, useEffect, JSX} from 'react';
-import type {DatabaseConfig, GitHubConfig, SchemaIndexProgress, SchemaIndexStatus} from '../types';
+import type {DatabaseConfig, GitHubConfig, LocalRepoStatus, LocalRepoSyncProgress, SchemaIndexProgress, SchemaIndexStatus} from '../types';
 import './SettingsView.css';
 
 export function SettingsView(): JSX.Element {
@@ -27,6 +27,12 @@ export function SettingsView(): JSX.Element {
 		testing: boolean;
 		result?: { valid: boolean; error?: string; user?: string }
 	}>({testing: false});
+	const [localRepoUrl, setLocalRepoUrl]                       = useState<string>('https://github.com/repo-owner/repo-name.git');
+	const [localRepoStatus, setLocalRepoStatus]                 = useState<LocalRepoStatus | null>(null);
+	const [localRepoSyncing, setLocalRepoSyncing]               = useState<boolean>(false);
+	const [localRepoError, setLocalRepoError]                   = useState<string>('');
+	const [localRepoMessage, setLocalRepoMessage]               = useState<string>('');
+	const [localRepoProgress, setLocalRepoProgress]             = useState<LocalRepoSyncProgress | null>(null);
 	const [appVersion, setAppVersion]                           = useState<string>('');
 	const [updateStatus, setUpdateStatus]                       = useState<'checking' | 'available' | 'downloading' | 'ready' | 'none'>('none');
 	const [updateInfo, setUpdateInfo]                           = useState<{ version?: string; progress?: number; error?: string }>({});
@@ -37,6 +43,7 @@ export function SettingsView(): JSX.Element {
 		loadApiKey();
 		loadUserName();
 		loadGitHubConfig();
+		loadLocalRepoStatus();
 		loadAppVersion();
 
 		// Setup update event listeners
@@ -82,6 +89,10 @@ export function SettingsView(): JSX.Element {
 			setUpdateStatus('none');
 		});
 
+		const unsubscribeLocalRepoProgress = window.electronAPI.onLocalRepoSyncProgress((progress) => {
+			setLocalRepoProgress(progress);
+		});
+
 		// Cleanup listeners on unmount
 		return () => {
 			unsubscribeSchemaProgress();
@@ -91,6 +102,7 @@ export function SettingsView(): JSX.Element {
 			unsubscribeDownloadProgress();
 			unsubscribeUpdateDownloaded();
 			unsubscribeUpdateError();
+			unsubscribeLocalRepoProgress();
 		};
 	}, []);
 
@@ -235,6 +247,18 @@ export function SettingsView(): JSX.Element {
 		}
 	}
 
+	async function loadLocalRepoStatus(): Promise<void> {
+		try {
+			const status = await window.electronAPI.getLocalRepoStatus();
+			setLocalRepoStatus(status);
+			if (status.url) {
+				setLocalRepoUrl(status.url);
+			}
+		} catch (error) {
+			console.error('Error loading local repo status:', error);
+		}
+	}
+
 	async function saveGitHubConfigFunction(): Promise<void> {
 		try {
 			await window.electronAPI.saveGitHubConfig(githubConfig);
@@ -253,6 +277,29 @@ export function SettingsView(): JSX.Element {
 		} catch (error) {
 			console.error('Error testing GitHub connection:', error);
 			setGithubValidation({testing: false, result: {valid: false, error: String(error)}});
+		}
+	}
+
+	async function syncLocalRepo(): Promise<void> {
+		setLocalRepoError('');
+		setLocalRepoMessage('');
+		setLocalRepoSyncing(true);
+		setLocalRepoProgress({stage: 'Starting sync'});
+		try {
+			const result = await window.electronAPI.syncLocalRepo(localRepoUrl);
+			if (!result.success) {
+				setLocalRepoError(result.error || 'Failed to sync repository.');
+			} else {
+				setLocalRepoMessage('Repository synchronized successfully.');
+				await loadLocalRepoStatus();
+			}
+		} catch (error) {
+			setLocalRepoError(error instanceof Error ? error.message : String(error));
+		} finally {
+			setLocalRepoSyncing(false);
+			setTimeout(() => {
+				setLocalRepoProgress(null);
+			}, 2000);
 		}
 	}
 
@@ -478,6 +525,82 @@ export function SettingsView(): JSX.Element {
 						</div>
 					)}
 				</div>
+			</section>
+
+			<section className="settings-section">
+				<h2>Local Git Sync</h2>
+				<p className="help-text" style={{marginBottom: '20px'}}>
+					Keep a local clone of your repository to avoid GitHub API rate limits.
+					The app will sync and use local files for searches when available.
+				</p>
+				<p className="help-text" style={{marginBottom: '20px'}}>
+					Branch handling is automatic: the app creates a local worktree per branch on demand,
+					based on the branch selected in each chat.
+				</p>
+
+				<div className="form-group">
+					<label htmlFor="local-repo-url">Repository URL</label>
+					<input
+						id="local-repo-url"
+						type="text"
+						value={localRepoUrl}
+						onChange={(event) => setLocalRepoUrl(event.target.value)}
+						placeholder="https://github.com/repo-owner/repo-name.git"
+					/>
+				</div>
+
+				<div className="form-group">
+					<div className="form-btn-flex">
+						<button onClick={syncLocalRepo} disabled={localRepoSyncing}>
+							{localRepoSyncing ? 'Syncing...' : 'Sync Repository'}
+						</button>
+						<button onClick={loadLocalRepoStatus} disabled={localRepoSyncing}>
+							Refresh Status
+						</button>
+					</div>
+					{localRepoMessage && (
+						<span className="status success">✓ {localRepoMessage}</span>
+					)}
+					{localRepoError && (
+						<span className="status error">⚠ {localRepoError}</span>
+					)}
+				</div>
+
+				{localRepoProgress && (
+					<div className="form-group">
+						<div style={{display: 'flex', justifyContent: 'space-between', marginBottom: '6px'}}>
+							<span>{localRepoProgress.stage}</span>
+							{typeof localRepoProgress.percent === 'number' && (
+								<span>{localRepoProgress.percent}%</span>
+							)}
+						</div>
+						<div style={{height: '8px', background: 'var(--border-color)', borderRadius: '4px', overflow: 'hidden'}}>
+							<div
+								style={{
+									height    : '100%',
+									width     : `${localRepoProgress.percent ?? 0}%`,
+									background: 'var(--accent-color)',
+									transition: 'width 0.2s ease',
+								}}
+							/>
+						</div>
+					</div>
+				)}
+
+				{localRepoStatus && (
+					<div className="form-group">
+						{localRepoStatus.exists ? (
+							<div className="status success">
+								✓ Local repo ready at: {localRepoStatus.repoPath}
+								{localRepoStatus.lastSyncIso ? ` (Last sync: ${localRepoStatus.lastSyncIso})` : ''}
+							</div>
+						) : (
+							<div className="status error">
+								⚠ Local repo not synced yet.
+							</div>
+						)}
+					</div>
+				)}
 			</section>
 
 			<section className="settings-section">

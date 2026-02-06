@@ -66,6 +66,49 @@ contextBridge.exposeInMainWorld('electronAPI', {
 	) =>
 		ipcRenderer.invoke('send-message', chatId, message, databases, history, chatContext, attachments),
 
+	startAiStream: (
+		chatId: string,
+		message: string,
+		databases: string[],
+		history?: Array<{ role: string; content: string }>,
+		chatContext?: { databaseName?: string; dbHost?: string; githubBranch?: string },
+		attachments?: any[],
+	) =>
+		ipcRenderer.invoke('start-ai-stream', chatId, message, databases, history, chatContext, attachments),
+
+	stopAiStream: (streamId: string) =>
+		ipcRenderer.invoke('stop-ai-stream', streamId),
+
+	onAiEvent: (callback: (payload: { streamId: string; event: any }) => void) => {
+		const listener = (_event: any, payload: { streamId: string; event: any }) => callback(payload);
+		ipcRenderer.on('ai-event', listener);
+		return () => {
+			ipcRenderer.removeListener('ai-event', listener);
+		};
+	},
+
+	onAiStreamFinished: (callback: (payload: {
+		streamId: string;
+		result: { shortAnswer: string; detailedAnswer: string; suggestedTitle?: string };
+	}) => void) => {
+		const listener = (_event: any, payload: {
+			streamId: string;
+			result: { shortAnswer: string; detailedAnswer: string; suggestedTitle?: string };
+		}) => callback(payload);
+		ipcRenderer.on('ai-finished', listener);
+		return () => {
+			ipcRenderer.removeListener('ai-finished', listener);
+		};
+	},
+
+	onAiStreamError: (callback: (payload: { streamId: string; error: string }) => void) => {
+		const listener = (_event: any, payload: { streamId: string; error: string }) => callback(payload);
+		ipcRenderer.on('ai-error', listener);
+		return () => {
+			ipcRenderer.removeListener('ai-error', listener);
+		};
+	},
+
 	getApiKey: () =>
 		ipcRenderer.invoke('get-api-key'),
 
@@ -95,8 +138,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
 		ipcRenderer.invoke('clear-working-summary', chatId),
 
 	// Progress updates
-	onMessageProgress: (callback: (status: string) => void) => {
-		const listener = (_event: any, status: string) => callback(status);
+	onMessageProgress: (callback: (payload: { chatId: string; streamId: string; status: string } | string) => void) => {
+		const listener = (_event: any, payload: any) => callback(payload);
 		ipcRenderer.on('message-progress', listener);
 		return () => {
 			ipcRenderer.removeListener('message-progress', listener);
@@ -113,6 +156,27 @@ contextBridge.exposeInMainWorld('electronAPI', {
 	validateGitHubConfig: () =>
 		ipcRenderer.invoke('validate-github-config'),
 
+	getLocalRepoStatus: () =>
+		ipcRenderer.invoke('get-local-repo-status'),
+
+	syncLocalRepo: (url: string) =>
+		ipcRenderer.invoke('sync-local-repo', url),
+
+	onLocalRepoSyncProgress: (callback: (progress: { stage: string; percent?: number; message?: string }) => void) => {
+		const listener = (_event: any, progress: { stage: string; percent?: number; message?: string }) => callback(progress);
+		ipcRenderer.on('local-repo-sync-progress', listener);
+		return () => {
+			ipcRenderer.removeListener('local-repo-sync-progress', listener);
+		};
+	},
+
+	// Git installation
+	checkGitInstalled: () =>
+		ipcRenderer.invoke('check-git-installed') as Promise<{ installed: boolean; version: string | null }>,
+
+	installGit: () =>
+		ipcRenderer.invoke('install-git') as Promise<{ success: boolean }>,
+
 	// User settings
 	getUserName: () =>
 		ipcRenderer.invoke('get-user-name'),
@@ -123,6 +187,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
 	// Window focus
 	focusWindow: () =>
 		ipcRenderer.invoke('focus-window'),
+
+	// Open external URL in default browser
+	openExternalUrl: (url: string) =>
+		ipcRenderer.invoke('open-external-url', url),
 
 	// Deep link handler
 	onDeepLink: (callback: (url: string) => void) => {

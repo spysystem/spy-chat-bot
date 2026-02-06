@@ -152,6 +152,21 @@ body {
 	background: transparent;
 }
 
+.chat-item-spinner {
+	width: 12px;
+	height: 12px;
+	border-radius: 50%;
+	border: 2px solid var(--border-color);
+	border-top-color: var(--accent-color);
+	animation: chat-item-spin 0.9s linear infinite;
+	flex: 0 0 auto;
+}
+
+@keyframes chat-item-spin {
+	from { transform: rotate(0deg); }
+	to { transform: rotate(360deg); }
+}
+
 .chat-item:hover {
 	background: var(--bg-tertiary);
 }

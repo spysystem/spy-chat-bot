@@ -33,6 +33,7 @@ export interface Chat {
 
 	databaseName?: string;
 	branch?: string;
+	systemUrl?: string;
 	workingSummary?: {
 		text: string;
 		updatedAt: string;
@@ -51,6 +52,7 @@ export interface ChatUpdate {
 	release?: string;
 	isRestore?: boolean;
 	isDevMode?: boolean;
+	systemUrl?: string;
 }
 
 function normalizeTitleSeed(value: string): string {
@@ -186,6 +188,9 @@ export class ChatService {
 			}
 			if (update.isDevMode !== undefined) {
 				chats[chatIndex].isDevMode = update.isDevMode;
+			}
+			if (update.systemUrl !== undefined) {
+				chats[chatIndex].systemUrl = update.systemUrl;
 			}
 		}
 
