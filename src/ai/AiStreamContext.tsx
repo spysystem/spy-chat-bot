@@ -25,19 +25,32 @@ export interface SendAiMessageInput {
 	attachments?: AttachmentMeta[];
 }
 
+export interface ClarificationRequest {
+	chatId: string;
+	question: string;
+	options?: string[];
+	allowFreeText?: boolean;
+}
+
 interface AiStreamContextValue {
 	streamsByChatId: Map<string, ChatStreamState>;
+	clarificationByChatId: Map<string, ClarificationRequest>;
 	isChatRunning: (chatId: string) => boolean;
 	getChatStreamState: (chatId: string) => ChatStreamState | null;
+	getClarificationRequest: (chatId: string) => ClarificationRequest | null;
 	startChatStream: (input: SendAiMessageInput) => Promise<{ streamId: string }>;
 	stopChatStream: (chatId: string) => Promise<void>;
+	submitClarification: (chatId: string, response: string) => Promise<void>;
 }
 
 const AiStreamContext = createContext<AiStreamContextValue | null>(null);
 
 export function AiStreamProvider({children}: { children: React.ReactNode }): JSX.Element {
-	const [streamsByChatId, setStreamsByChatId] = useState<Map<string, ChatStreamState>>(new Map());
-	const streamIdToChatIdRef                   = useRef<Map<string, string>>(new Map());
+	const [streamsByChatId, setStreamsByChatId]             = useState<Map<string, ChatStreamState>>(new Map());
+	const [clarificationByChatId, setClarificationByChatId] = useState<Map<string, ClarificationRequest>>(new Map());
+	const streamIdToChatIdRef                               = useRef<Map<string, string>>(new Map());
+	const streamIdToInputRef                                = useRef<Map<string, SendAiMessageInput>>(new Map());
+	const clarificationInputByChatIdRef                     = useRef<Map<string, SendAiMessageInput>>(new Map());
 
 	useEffect(() => {
 		const offEvent = window.electronAPI.onAiEvent((payload) => {
@@ -101,10 +114,10 @@ export function AiStreamProvider({children}: { children: React.ReactNode }): JSX
 					next.set(chatId, {
 						...current,
 						partialText,
-						hasStreamedContent: current.hasStreamedContent || partialText.trim() !== '',
-						// If we never saw START events, we still treat deltas as an active message.
-						inTextMessage: true,
-						lastEventAtMs: Date.now(),
+						// Don't show partial streaming - show loading until complete. User sees full answer when done.
+						hasStreamedContent: false,
+						inTextMessage     : true,
+						lastEventAtMs     : Date.now(),
 					});
 					return next;
 				});
@@ -150,6 +163,58 @@ export function AiStreamProvider({children}: { children: React.ReactNode }): JSX
 				return next;
 			});
 			streamIdToChatIdRef.current.delete(payload.streamId);
+			streamIdToInputRef.current.delete(payload.streamId);
+		});
+
+		const offClarification = window.electronAPI.onAiAskingClarification(async (payload) => {
+			const chatId = payload.chatId;
+			streamIdToChatIdRef.current.delete(payload.streamId);
+
+			// Persist the assistant question so it appears in the chat
+			try {
+				const chat             = await window.electronAPI.getChat(chatId);
+				const existingMessages = (chat?.messages || []).map((m) => ({
+					role           : m.role,
+					content        : m.content,
+					detailedContent: (m as any).detailedContent,
+					timestamp      : m.timestamp,
+					attachments    : (m as any).attachments,
+				}));
+
+				const assistantMessage: any = {
+					role     : 'assistant',
+					content  : payload.question,
+					timestamp: new Date().toISOString(),
+				};
+
+				await window.electronAPI.updateChat(chatId, [...existingMessages, assistantMessage]);
+			} catch {
+				// Non-fatal
+			}
+
+			// Store input for when user submits (need databases, history, etc.)
+			const input = streamIdToInputRef.current.get(payload.streamId);
+			streamIdToInputRef.current.delete(payload.streamId);
+			if (input) {
+				clarificationInputByChatIdRef.current.set(chatId, input);
+			}
+
+			setStreamsByChatId((prev) => {
+				const next = new Map(prev);
+				next.delete(chatId);
+				return next;
+			});
+
+			setClarificationByChatId((prev) => {
+				const next = new Map(prev);
+				next.set(chatId, {
+					chatId       : payload.chatId,
+					question     : payload.question,
+					options      : payload.options,
+					allowFreeText: payload.allowFreeText !== false,
+				});
+				return next;
+			});
 		});
 
 		const offError = window.electronAPI.onAiStreamError((payload) => {
@@ -203,6 +268,7 @@ export function AiStreamProvider({children}: { children: React.ReactNode }): JSX
 		return () => {
 			offEvent();
 			offFinished();
+			offClarification();
 			offError();
 			offProgress();
 		};
@@ -211,12 +277,14 @@ export function AiStreamProvider({children}: { children: React.ReactNode }): JSX
 	const value = useMemo<AiStreamContextValue>(() => {
 		return {
 			streamsByChatId,
-			isChatRunning     : (chatId: string) => {
+			clarificationByChatId,
+			isChatRunning          : (chatId: string) => {
 				const state = streamsByChatId.get(chatId);
 				return !!state && (state.status === 'running' || state.status === 'stopping');
 			},
-			getChatStreamState: (chatId: string) => streamsByChatId.get(chatId) || null,
-			startChatStream   : async (input: SendAiMessageInput) => {
+			getChatStreamState     : (chatId: string) => streamsByChatId.get(chatId) || null,
+			getClarificationRequest: (chatId: string) => clarificationByChatId.get(chatId) || null,
+			startChatStream        : async (input: SendAiMessageInput) => {
 				const now = Date.now();
 
 				// Persist user message immediately so it shows in history even if user navigates away.
@@ -252,6 +320,7 @@ export function AiStreamProvider({children}: { children: React.ReactNode }): JSX
 				);
 
 				streamIdToChatIdRef.current.set(streamId, input.chatId);
+				streamIdToInputRef.current.set(streamId, input);
 
 				setStreamsByChatId((prev) => {
 					const next = new Map(prev);
@@ -271,7 +340,7 @@ export function AiStreamProvider({children}: { children: React.ReactNode }): JSX
 
 				return {streamId};
 			},
-			stopChatStream    : async (chatId: string) => {
+			stopChatStream         : async (chatId: string) => {
 				const state = streamsByChatId.get(chatId);
 				if (!state || !state.streamId) {
 					return;
@@ -287,8 +356,71 @@ export function AiStreamProvider({children}: { children: React.ReactNode }): JSX
 				});
 				await window.electronAPI.stopAiStream(state.streamId);
 			},
+			submitClarification    : async (chatId: string, response: string) => {
+				const clarification = clarificationByChatId.get(chatId);
+				const input         = clarificationInputByChatIdRef.current.get(chatId);
+				if (!clarification || !input) {
+					return;
+				}
+				clarificationInputByChatIdRef.current.delete(chatId);
+				setClarificationByChatId((prev) => {
+					const next = new Map(prev);
+					next.delete(chatId);
+					return next;
+				});
+
+				// Persist user response
+				const chat             = await window.electronAPI.getChat(chatId);
+				const existingMessages = (chat?.messages || []).map((m) => ({
+					role           : m.role,
+					content        : m.content,
+					detailedContent: (m as any).detailedContent,
+					timestamp      : m.timestamp,
+					attachments    : (m as any).attachments,
+				}));
+
+				const userMessage: any = {
+					role     : 'user',
+					content  : response,
+					timestamp: new Date().toISOString(),
+				};
+
+				await window.electronAPI.updateChat(chatId, [...existingMessages, userMessage]);
+
+				// Build history: [original user message, assistant question] - we already added assistant in offClarification
+				const history = existingMessages.map((m) => ({role: m.role, content: m.content}));
+
+				// Start new stream with clarification as context
+				const {streamId} = await window.electronAPI.startAiStream(
+					chatId,
+					response,
+					input.databases,
+					history,
+					input.chatContext,
+					input.attachments,
+				);
+
+				streamIdToChatIdRef.current.set(streamId, chatId);
+				streamIdToInputRef.current.set(streamId, {...input, message: response, history});
+
+				setStreamsByChatId((prev) => {
+					const next = new Map(prev);
+					next.set(chatId, {
+						chatId            : chatId,
+						streamId,
+						status            : 'running',
+						startedAtMs       : Date.now(),
+						lastEventAtMs     : Date.now(),
+						partialText       : '',
+						inTextMessage     : false,
+						hasStreamedContent: false,
+						progressStatus    : 'Processing...',
+					});
+					return next;
+				});
+			},
 		};
-	}, [streamsByChatId]);
+	}, [streamsByChatId, clarificationByChatId]);
 
 	return (
 		<AiStreamContext.Provider value={value}>

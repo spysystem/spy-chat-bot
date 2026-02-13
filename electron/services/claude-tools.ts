@@ -138,15 +138,15 @@ function extractTableNames(sql: string): string[] {
 function extractPossibleColumnNamesSingleTable(sql: string): string[] {
 	// Extract column names from entire SQL, not just WHERE clause
 	// This catches columns in SELECT, CASE WHEN, WHERE, ORDER BY, GROUP BY, etc.
-	
+
 	// Remove string literals to avoid false matches
 	let cleanSql = sql
 		.replace(/'[^']*'/g, ' ')
 		.replace(/"[^"]*"/g, ' ');
-	
+
 	// Remove AS aliases (the word after AS is not a column)
 	cleanSql = cleanSql.replace(/\bAS\s+[a-zA-Z_][a-zA-Z0-9_]*/gi, ' ');
-	
+
 	// Find all potential identifiers
 	const tokens = cleanSql
 		.match(/[a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)?|`[a-zA-Z0-9_]+`(?:\.`[a-zA-Z0-9_]+`)?/g) || [];
@@ -219,12 +219,13 @@ async function preflightQueryAgainstSchemaIndex(
 	if (missingTables.length > 0) {
 		return {
 			ok   : false,
-			error: `Schema index: table(s) not found: ${missingTables.join(', ')}`,
+			error: `TABLE(S) DO NOT EXIST: ${missingTables.join(', ')}. You MUST use search_schema to find the correct table name. NEVER guess table names.`,
 			hints: {
 				unknownTable: missingTables.map((t) => ({
 					requested  : t,
 					suggestions: schemaIndexService.searchSchema(index, t, 10),
 				})),
+				action      : 'Call search_schema with a keyword from the table name to find the correct table. Example: search_schema("shipping") or search_schema("order")',
 			},
 		};
 	}
@@ -300,10 +301,10 @@ export async function createClaudeTools(options: ClaudeToolOptions): Promise<Cla
 
 	const queryDatabaseDef = toolDefinition({
 		name        : 'query_database',
-		description : 'Execute a READ-ONLY SQL query. IMPORTANT: Before using this tool, ALWAYS call get_table_schema_cached first to verify exact column names - DO NOT guess column names! Use for questions about specific records (orders, customers, returns), counts, lists, or data lookups.',
+		description : 'Execute a READ-ONLY SQL query. MANDATORY: Before using this tool, you MUST call search_schema to find the correct table name AND get_table_schema_cached to verify exact column names. NEVER guess table or column names — queries with wrong names will be rejected.',
 		inputSchema : z.object({
 			dbId : z.string().describe('Database connection ID from the available connections'),
-			query: z.string().describe('SELECT/SHOW/DESCRIBE/EXPLAIN query using ONLY verified column names from get_table_schema_cached. Always use LIMIT for large result sets.'),
+			query: z.string().describe('SELECT/SHOW/DESCRIBE/EXPLAIN query using ONLY verified table and column names from search_schema + get_table_schema_cached. Always use LIMIT for large result sets.'),
 		}),
 		outputSchema: z.any(),
 	});
@@ -403,6 +404,18 @@ export async function createClaudeTools(options: ClaudeToolOptions): Promise<Cla
 		inputSchema : z.object({}),
 		outputSchema: z.any(),
 	});
+
+	const askClarifyingQuestionDef = toolDefinition({
+		name        : 'ask_clarifying_question',
+		description : 'Ask the user a clarifying question to give a better answer. Use freely when context would help (which system, online vs POS, new vs existing, scope of question). Provide 2-4 clickable options when possible. Do NOT use for info you can find via search_code or query_database.',
+		inputSchema : z.object({
+			question     : z.string().describe('The clarifying question in the user\'s language'),
+			options      : z.array(z.string()).optional().describe('2-4 suggested answers the user can click (e.g. ["Online shop", "POS terminal", "Both"])'),
+			allowFreeText: z.boolean().optional().describe('If true, show a text field for custom input. Default: true'),
+		}),
+		outputSchema: z.any(),
+	});
+
 	const {
 			  databaseService,
 			  githubService,
@@ -414,7 +427,7 @@ export async function createClaudeTools(options: ClaudeToolOptions): Promise<Cla
 			  onProgress,
 			  onDebugLog,
 			  queryResults,
-		  }                         = options;
+		  } = options;
 
 	const configs          = await databaseService.getConfigs();
 	const dbConfigs        = configs.filter((c) => databaseIds.includes(c.id)) as DbConfig[];
@@ -659,7 +672,7 @@ export async function createClaudeTools(options: ClaudeToolOptions): Promise<Cla
 
 	if (hasGitHub) {
 		tools.push(searchCodeDef.server(async (args) => {
-			const {query} = args as { query: string };
+			const {query}         = args as { query: string };
 			codeSearchCallCount += 1;
 			const isOverSoftLimit = codeSearchCallCount > 15;
 			if (isOverSoftLimit) {
@@ -747,7 +760,10 @@ export async function createClaudeTools(options: ClaudeToolOptions): Promise<Cla
 			onDebugLog?.('tool', 'Ripgrep', `Context extraction completed in ${totalMs}ms`, `Extracted ${contexts.length} snippets`);
 
 			if (isOverSoftLimit) {
-				return {data: contexts, note: `Search #${codeSearchCallCount}. Tip: use read_file or read_file_section to read specific files you already found.`};
+				return {
+					data: contexts,
+					note: `Search #${codeSearchCallCount}. Tip: use read_file or read_file_section to read specific files you already found.`,
+				};
 			}
 			return contexts;
 		}));
@@ -833,6 +849,18 @@ export async function createClaudeTools(options: ClaudeToolOptions): Promise<Cla
 			return data;
 		}));
 	}
+
+	// Always available: ask user for clarification (Cursor-style follow-up)
+	tools.push(askClarifyingQuestionDef.server(async (args) => {
+		const {question, options, allowFreeText} = args as { question: string; options?: string[]; allowFreeText?: boolean };
+		onDebugLog?.('info', 'Clarification', `AI asking: ${question}`, options?.join(', ') || '');
+		return {
+			__clarificationRequest: true,
+			question,
+			options               : options && options.length > 0 ? options : undefined,
+			allowFreeText         : allowFreeText !== false,
+		};
+	}));
 
 	return {
 		tools,

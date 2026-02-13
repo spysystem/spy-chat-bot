@@ -157,6 +157,13 @@ declare global {
 				result: { shortAnswer: string; detailedAnswer: string; suggestedTitle?: string };
 			}) => void) => () => void;
 			onAiStreamError: (callback: (payload: { streamId: string; error: string }) => void) => () => void;
+			onAiAskingClarification: (callback: (payload: {
+				streamId: string;
+				chatId: string;
+				question: string;
+				options?: string[];
+				allowFreeText?: boolean
+			}) => void) => () => void;
 			getApiKey: () => Promise<string | null>;
 			saveApiKey: (apiKey: string) => Promise<void>;
 			getChats: () => Promise<Chat[]>;

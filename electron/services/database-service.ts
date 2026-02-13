@@ -291,11 +291,28 @@ export class DatabaseService {
 			}
 
 			// LAYER 4: MySQL enforced read-only transaction (set in getConnection)
-			const connection     = await this.getConnection(configId, databaseName, hostOverride, portOverride);
-			const [rows, fields] = await connection.query(query);
+			const connection = await this.getConnection(configId, databaseName, hostOverride, portOverride);
+
+			// Enforce a 60-second per-query timeout to prevent runaway queries.
+			// mysql2 will cancel the query when the timeout is reached.
+			const QUERY_TIMEOUT_MS = 60_000;
+			let rows: any;
+			let fields: any;
+			try {
+				[rows, fields] = await connection.query({sql: query, timeout: QUERY_TIMEOUT_MS});
+			} catch (queryError) {
+				const msg = queryError instanceof Error ? queryError.message : String(queryError);
+				// Provide a clear timeout message so Claude knows to simplify the query
+				if (msg.includes('timeout') || msg.includes('TIMEOUT') || msg.includes('ETIMEDOUT')) {
+					const timeoutError = `QUERY TIMEOUT: Query exceeded ${QUERY_TIMEOUT_MS / 1000}s limit and was cancelled. Simplify the query: use smaller LIMIT, fewer JOINs, or add WHERE conditions to narrow the data.`;
+					await this.logQuery(query, databaseName, configId, false, timeoutError);
+					throw new Error(timeoutError);
+				}
+				throw queryError;
+			}
 
 			const result = {
-				columns : fields?.map((f) => f.name) || [],
+				columns : fields?.map((f: any) => f.name) || [],
 				rows    : rows as Array<Record<string, unknown>>,
 				rowCount: Array.isArray(rows) ? rows.length : 0,
 			};
@@ -307,7 +324,7 @@ export class DatabaseService {
 		} catch (error) {
 			// If error wasn't already logged (non-security errors), log it now
 			const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-			if (!errorMessage.includes('SECURITY VIOLATION')) {
+			if (!errorMessage.includes('SECURITY VIOLATION') && !errorMessage.includes('QUERY TIMEOUT')) {
 				await this.logQuery(query, databaseName, configId, false, errorMessage);
 			}
 			throw error;

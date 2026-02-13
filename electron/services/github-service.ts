@@ -5,16 +5,27 @@ import * as path from 'path';
 import {promisify} from 'util';
 import {SecureStorageService} from './secure-storage-service';
 
-// Ripgrep binary path from @vscode/ripgrep package
+// Ripgrep binary path from @vscode/ripgrep package.
+// In a packaged Electron app the binary lives inside app.asar, which the OS
+// cannot execute directly. electron-builder's asarUnpack extracts it to
+// app.asar.unpacked/, so we need to rewrite the path accordingly.
 let rgPath: string | null = null;
+
 async function getRipgrepPath(): Promise<string> {
 	if (rgPath) {
 		return rgPath;
 	}
 	try {
-		// @vscode/ripgrep exports the path to the rg binary
-		const rgModule = await import('@vscode/ripgrep');
-		rgPath = rgModule.rgPath;
+		const rgModule   = await import('@vscode/ripgrep');
+		let resolvedPath = rgModule.rgPath;
+
+		// When running from a packaged ASAR archive, swap "app.asar" for
+		// "app.asar.unpacked" so the OS can actually spawn the binary.
+		if (resolvedPath.includes('app.asar')) {
+			resolvedPath = resolvedPath.replace('app.asar', 'app.asar.unpacked');
+		}
+
+		rgPath = resolvedPath;
 		return rgPath;
 	} catch (error) {
 		throw new Error(`Failed to load ripgrep: ${error}`);
@@ -43,7 +54,7 @@ export class GitHubService {
 		mode: 'all' | 'any';
 		pathSpecs: string[];
 		durationMs: number;
-	} = null;
+	}                                                = null;
 
 
 	constructor(secureStorage: SecureStorageService) {
@@ -297,10 +308,10 @@ export class GitHubService {
 			const config = await this.getConfig();
 			if (config?.token && url.includes('github.com')) {
 				// Embed token in URL for authentication: https://TOKEN@github.com/owner/repo.git
-				const urlObj = new URL(url);
+				const urlObj    = new URL(url);
 				urlObj.username = config.token;
 				urlObj.password = 'x-oauth-basic';
-				cloneUrl = urlObj.toString();
+				cloneUrl        = urlObj.toString();
 				console.log('[GitHubService] Using authenticated clone URL');
 			}
 		} catch {
@@ -503,33 +514,32 @@ export class GitHubService {
 	}
 
 	private inferPathSpecs(tokens: string[]): string[] {
-		const t = new Set(tokens.map((x) => x.toLowerCase()));
+		const t               = new Set(tokens.map((x) => x.toLowerCase()));
 		const specs: string[] = [];
 
 		// SPY-specific module mappings for fast path-based filtering
 		const moduleMap: Record<string, string[]> = {
-			confident : ['applications/Spy/Controller/Confident', 'applications/Spy/Model/Confident', 'applications/Spy/View/Confident'],
-			sales     : ['applications/Spy/Controller/Sales', 'applications/Spy/Model/Sales', 'applications/Spy/View/Sales'],
-			purchase  : ['applications/Spy/Controller/Purchase', 'applications/Spy/Model/Purchase', 'applications/Spy/View/Purchase'],
-			order     : ['applications/Spy/Controller/Order', 'applications/Spy/Model/Order', 'applications/Spy/View/Order', 'applications/Spy/Controller/Sales'],
-			customer  : ['applications/Spy/Controller/Customer', 'applications/Spy/Model/Customer', 'applications/Spy/View/Customer'],
-			product   : ['applications/Spy/Controller/Product', 'applications/Spy/Model/Product', 'applications/Spy/View/Product'],
-			inventory : ['applications/Spy/Controller/Inventory', 'applications/Spy/Model/Inventory', 'applications/Spy/View/Inventory'],
-			warehouse : ['applications/Spy/Controller/Warehouse', 'applications/Spy/Model/Warehouse', 'applications/Spy/View/Warehouse'],
-			shipping  : ['applications/Spy/Controller/Shipping', 'applications/Spy/Model/Shipping', 'applications/Spy/View/Shipping'],
-			invoice   : ['applications/Spy/Controller/Invoice', 'applications/Spy/Model/Invoice', 'applications/Spy/View/Invoice'],
-			claim     : ['applications/Spy/Controller/Claim', 'applications/Spy/Model/Claim', 'applications/Spy/View/Claim'],
-			return    : ['applications/Spy/Controller/Return', 'applications/Spy/Model/Return', 'applications/Spy/View/Return', 'applications/Spy/Controller/Claim'],
-			season    : ['applications/Spy/Model/Season', 'applications/Spy/Controller/Season'],
-			sæson     : ['applications/Spy/Model/Season', 'applications/Spy/Controller/Season'],
-			topseller : ['applications/Spy/Controller/Confident', 'applications/Spy/Model/Confident'],
-			edi       : ['applications/Spy/Controller/EDI', 'applications/Spy/Model/EDI', 'applications/Spy/View/EDI'],
-			report    : ['applications/Spy/Controller/Report', 'applications/Spy/Model/Report', 'applications/Spy/View/Report'],
-			api       : ['applications/Spy/Controller/Api', 'applications/Spy/Model/Api'],
-			brand     : ['applications/Spy/Controller/Brand', 'applications/Spy/Model/Brand', 'applications/Spy/View/Brand'],
-			supplier  : ['applications/Spy/Controller/Supplier', 'applications/Spy/Model/Supplier', 'applications/Spy/View/Supplier'],
-			user      : ['applications/Spy/Controller/User', 'applications/Spy/Model/User', 'applications/Spy/View/User'],
-			nemedi    : ['applications/Spy/Controller/NemEdi', 'applications/Spy/Model/NemEdi', 'applications/Spy/View/NemEdi', 'applications/Spy/Controller/EDI'],
+			confident: ['applications/Spy/Controller/Confident', 'applications/Spy/Model/Confident', 'applications/Spy/View/Confident'],
+			sales    : ['applications/Spy/Controller/Sales', 'applications/Spy/Model/Sales', 'applications/Spy/View/Sales'],
+			purchase : ['applications/Spy/Controller/Purchase', 'applications/Spy/Model/Purchase', 'applications/Spy/View/Purchase'],
+			order    : ['applications/Spy/Controller/Order', 'applications/Spy/Model/Order', 'applications/Spy/View/Order', 'applications/Spy/Controller/Sales'],
+			customer : ['applications/Spy/Controller/Customer', 'applications/Spy/Model/Customer', 'applications/Spy/View/Customer'],
+			product  : ['applications/Spy/Controller/Product', 'applications/Spy/Model/Product', 'applications/Spy/View/Product'],
+			inventory: ['applications/Spy/Controller/Inventory', 'applications/Spy/Model/Inventory', 'applications/Spy/View/Inventory'],
+			warehouse: ['applications/Spy/Controller/Warehouse', 'applications/Spy/Model/Warehouse', 'applications/Spy/View/Warehouse'],
+			shipping : ['applications/Spy/Controller/Shipping', 'applications/Spy/Model/Shipping', 'applications/Spy/View/Shipping'],
+			invoice  : ['applications/Spy/Controller/Invoice', 'applications/Spy/Model/Invoice', 'applications/Spy/View/Invoice'],
+			claim    : ['applications/Spy/Controller/Claim', 'applications/Spy/Model/Claim', 'applications/Spy/View/Claim'],
+			return   : ['applications/Spy/Controller/Return', 'applications/Spy/Model/Return', 'applications/Spy/View/Return', 'applications/Spy/Controller/Claim'],
+			season   : ['applications/Spy/Model/Season', 'applications/Spy/Controller/Season'],
+			topseller: ['applications/Spy/Controller/Confident', 'applications/Spy/Model/Confident'],
+			edi      : ['applications/Spy/Controller/EDI', 'applications/Spy/Model/EDI', 'applications/Spy/View/EDI'],
+			report   : ['applications/Spy/Controller/Report', 'applications/Spy/Model/Report', 'applications/Spy/View/Report'],
+			api      : ['applications/Spy/Controller/Api', 'applications/Spy/Model/Api'],
+			brand    : ['applications/Spy/Controller/Brand', 'applications/Spy/Model/Brand', 'applications/Spy/View/Brand'],
+			supplier : ['applications/Spy/Controller/Supplier', 'applications/Spy/Model/Supplier', 'applications/Spy/View/Supplier'],
+			user     : ['applications/Spy/Controller/User', 'applications/Spy/Model/User', 'applications/Spy/View/User'],
+			nemedi   : ['applications/Spy/Controller/NemEdi', 'applications/Spy/Model/NemEdi', 'applications/Spy/View/NemEdi', 'applications/Spy/Controller/EDI'],
 		};
 
 		for (const token of t) {
@@ -688,11 +698,11 @@ export class GitHubService {
 					branch,
 					worktreePath,
 					tokens,
-					mode: 'any',
-					pathSpecs: existingPaths,
+					mode      : 'any',
+					pathSpecs : existingPaths,
 					durationMs: 0,
 				};
-				const args = buildArgs(existingPaths);
+				const args               = buildArgs(existingPaths);
 				({stdout, exitCode} = await this.runRipgrep(args, worktreePath));
 			}
 		}
@@ -703,11 +713,11 @@ export class GitHubService {
 				branch,
 				worktreePath,
 				tokens,
-				mode: 'any',
-				pathSpecs: ['(global)'],
+				mode      : 'any',
+				pathSpecs : ['(global)'],
 				durationMs: 0,
 			};
-			const args = buildArgs([]);
+			const args               = buildArgs([]);
 			({stdout, exitCode} = await this.runRipgrep(args, worktreePath));
 		}
 
@@ -789,7 +799,14 @@ export class GitHubService {
 		return scored.slice(0, 15).map(({path: p, matches}) => ({path: p, matches}));
 	}
 
-	getLastLocalSearchMeta(): null | { branch: string; worktreePath: string; tokens: string[]; mode: 'all' | 'any'; pathSpecs: string[]; durationMs: number } {
+	getLastLocalSearchMeta(): null | {
+		branch: string;
+		worktreePath: string;
+		tokens: string[];
+		mode: 'all' | 'any';
+		pathSpecs: string[];
+		durationMs: number
+	} {
 		return this.lastLocalSearchMeta;
 	}
 
@@ -802,10 +819,10 @@ export class GitHubService {
 
 	async readFileLocalSnippet(filePath: string, branch: string, url: string, startLine: number, endLine: number): Promise<string> {
 		const content = await this.readFileLocal(filePath, branch, url);
-		const lines = content.split(/\r?\n/);
-		const start = Math.max(1, Math.floor(startLine));
-		const end = Math.max(start, Math.floor(endLine));
-		const slice = lines.slice(start - 1, end);
+		const lines   = content.split(/\r?\n/);
+		const start   = Math.max(1, Math.floor(startLine));
+		const end     = Math.max(start, Math.floor(endLine));
+		const slice   = lines.slice(start - 1, end);
 		return slice
 			.map((line, idx) => `${start + idx}|${line}`)
 			.join('\n');

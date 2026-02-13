@@ -109,6 +109,26 @@ contextBridge.exposeInMainWorld('electronAPI', {
 		};
 	},
 
+	onAiAskingClarification: (callback: (payload: {
+		streamId: string;
+		chatId: string;
+		question: string;
+		options?: string[];
+		allowFreeText?: boolean;
+	}) => void) => {
+		const listener = (_event: any, payload: {
+			streamId: string;
+			chatId: string;
+			question: string;
+			options?: string[];
+			allowFreeText?: boolean;
+		}) => callback(payload);
+		ipcRenderer.on('ai-asking-clarification', listener);
+		return () => {
+			ipcRenderer.removeListener('ai-asking-clarification', listener);
+		};
+	},
+
 	getApiKey: () =>
 		ipcRenderer.invoke('get-api-key'),
 

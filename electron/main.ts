@@ -418,7 +418,7 @@ ipcMain.handle('start-ai-stream', async (event, chatId: string, message: string,
 			const localRepoUrl = githubService.getLocalRepoUrl();
 			const branch       = chatContext?.githubBranch?.trim();
 			if (localRepoUrl && branch) {
-				const githubConfig = await githubService.getConfig();
+				const githubConfig    = await githubService.getConfig();
 				const effectiveBranch = branch || githubConfig?.branch || 'main';
 				try {
 					sendDebugLog('info', 'Worktree', `Ensuring worktree exists for branch: ${effectiveBranch}`);
@@ -450,7 +450,17 @@ ipcMain.handle('start-ai-stream', async (event, chatId: string, message: string,
 				onEvent,
 				abortController,
 			);
-			event.sender.send('ai-finished', {streamId, result});
+			if (result && 'needsClarification' in result && result.needsClarification) {
+				event.sender.send('ai-asking-clarification', {
+					streamId,
+					chatId,
+					question     : result.question,
+					options      : result.options,
+					allowFreeText: result.allowFreeText,
+				});
+			} else {
+				event.sender.send('ai-finished', {streamId, result});
+			}
 		} catch (error) {
 			const messageText = error instanceof Error ? error.message : String(error);
 			event.sender.send('ai-error', {streamId, error: messageText});
@@ -578,7 +588,7 @@ ipcMain.handle('sync-local-repo', async (_event, url: string) => {
 // Git installation check
 ipcMain.handle('check-git-installed', async () => {
 	const installed = await gitInstallerService.isGitInstalled();
-	const version = installed ? await gitInstallerService.getGitVersion() : null;
+	const version   = installed ? await gitInstallerService.getGitVersion() : null;
 	return {installed, version};
 });
 

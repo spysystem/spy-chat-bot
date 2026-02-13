@@ -30,24 +30,38 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 	const [githubBranch, setGithubBranch]                 = useState<string>('');
 
 	// System selector state (per chat)
-	const [systems, setSystems]                     = useState<SystemDirectorySystem[]>([]);
-	const [systemsLoading, setSystemsLoading]       = useState<boolean>(false);
-	const [systemsError, setSystemsError]           = useState<string>('');
-	const [systemSearch, setSystemSearch]           = useState<string>('');
-	const [showSystemResults, setShowSystemResults] = useState<boolean>(false);
-	const [filterActive, setFilterActive]           = useState<boolean>(true);
-	const [filterRestore, setFilterRestore]         = useState<boolean>(false);
-	const [filterDev, setFilterDev]                 = useState<boolean>(false);
+	const [systems, setSystems]                             = useState<SystemDirectorySystem[]>([]);
+	const [systemsLoading, setSystemsLoading]               = useState<boolean>(false);
+	const [systemsError, setSystemsError]                   = useState<string>('');
+	const [systemSearch, setSystemSearch]                   = useState<string>('');
+	const [showSystemResults, setShowSystemResults]         = useState<boolean>(false);
+	const [filterActive, setFilterActive]                   = useState<boolean>(true);
+	const [filterRestore, setFilterRestore]                 = useState<boolean>(false);
+	const [filterDev, setFilterDev]                         = useState<boolean>(false);
+	const [clarificationFreeText, setClarificationFreeText] = useState('');
 
-	const systemSelectorReference                               = useRef<HTMLDivElement>(null);
-	const messagesEndReference                                  = useRef<HTMLDivElement>(null);
-	const previousChatIdReference                               = useRef<string>(chatId);
-	const textareaReference                                     = useRef<HTMLTextAreaElement>(null);
-	const fileInputReference                                    = useRef<HTMLInputElement>(null);
-	const {getChatStreamState, startChatStream, stopChatStream} = useAiStreams();
-	const streamState                                           = getChatStreamState(chatId);
-	const isStreamRunning                                       = !!streamState && (streamState.status === 'running' || streamState.status === 'stopping');
-	const progressStatus                                        = streamState?.progressStatus || '';
+	const systemSelectorReference = useRef<HTMLDivElement>(null);
+	const messagesEndReference    = useRef<HTMLDivElement>(null);
+	const previousChatIdReference = useRef<string>(chatId);
+	const textareaReference       = useRef<HTMLTextAreaElement>(null);
+	const fileInputReference      = useRef<HTMLInputElement>(null);
+	const {
+			  getChatStreamState,
+			  startChatStream,
+			  stopChatStream,
+			  getClarificationRequest,
+			  submitClarification,
+		  }                       = useAiStreams();
+	const streamState             = getChatStreamState(chatId);
+	const clarificationRequest    = getClarificationRequest(chatId);
+	const isStreamRunning         = !!streamState && (streamState.status === 'running' || streamState.status === 'stopping');
+	const progressStatus          = streamState?.progressStatus || '';
+
+	useEffect(() => {
+		if (!clarificationRequest) {
+			setClarificationFreeText('');
+		}
+	}, [clarificationRequest]);
 
 	const DEV_SQL_HOST = 'dev2.spysystem.dk';
 
@@ -495,13 +509,31 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 		setIsSending(true);
 
 		try {
-			// Send only the last 5 messages for context to avoid token limit
-			// (some queries return very large results)
-			const recentMessages      = newMessages.slice(-5);
-			const conversationHistory = recentMessages.map((m) => ({
-				role   : m.role,
-				content: m.content,
-			}));
+			// Build conversation history with technical detail (detailedContent)
+			// so Claude remembers which tables/schemas it discovered earlier.
+			// Send up to 20 messages but truncate very large assistant answers.
+			const MAX_HISTORY_MESSAGES   = 20;
+			const MAX_ASSISTANT_CHAR_LEN = 2000;
+
+			const recentMessages      = newMessages.slice(-MAX_HISTORY_MESSAGES);
+			const conversationHistory = recentMessages.map((m) => {
+				// For assistant messages, prefer detailedContent (contains SQL, tables, schemas)
+				// over the simplified user-friendly content.
+				let text = (m.role === 'assistant' && m.detailedContent)
+					? m.detailedContent
+					: m.content;
+
+				// Truncate very large assistant answers to stay within token limits
+				// but keep enough to preserve table names, queries, and schema info.
+				if (m.role === 'assistant' && text.length > MAX_ASSISTANT_CHAR_LEN) {
+					text = text.substring(0, MAX_ASSISTANT_CHAR_LEN) + '\n\n[... truncated for brevity ...]';
+				}
+
+				return {
+					role   : m.role,
+					content: text,
+				};
+			});
 
 			const effectiveDatabaseName = databaseName.trim() || undefined;
 			const effectiveDbHost       = selectedChat?.dbHost && selectedChat.dbHost.trim() !== ''
@@ -818,7 +850,7 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 										{shownText}
 									</ReactMarkdown>
 								) : (
-									<p>{message.content}</p>
+									<div className="user-text">{message.content}</div>
 								)}
 							</div>
 						</div>
@@ -848,6 +880,61 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 
 				<div ref={messagesEndReference}/>
 			</div>
+
+			{clarificationRequest && (
+				<div className="clarification-area">
+					<div className="clarification-question">{clarificationRequest.question}</div>
+					{clarificationRequest.options && clarificationRequest.options.length > 0 && (
+						<div className="clarification-options">
+							{clarificationRequest.options.map((opt) => (
+								<button
+									key={opt}
+									className="clarification-option"
+									onClick={() => {
+										setClarificationFreeText('');
+										submitClarification(chatId, opt);
+									}}
+								>
+									{opt}
+								</button>
+							))}
+						</div>
+					)}
+					{(clarificationRequest.allowFreeText || (clarificationRequest.options?.length ?? 0) === 0) && (
+						<div className="clarification-free-text">
+							<input
+								type="text"
+								value={clarificationFreeText}
+								onChange={(e) => setClarificationFreeText(e.target.value)}
+								onKeyDown={(e) => {
+									if (e.key === 'Enter') {
+										e.preventDefault();
+										const text = clarificationFreeText.trim();
+										if (text) {
+											setClarificationFreeText('');
+											submitClarification(chatId, text);
+										}
+									}
+								}}
+								placeholder="Type your answer..."
+								autoFocus
+							/>
+							<button
+								onClick={() => {
+									const text = clarificationFreeText.trim();
+									if (text) {
+										setClarificationFreeText('');
+										submitClarification(chatId, text);
+									}
+								}}
+								disabled={!clarificationFreeText.trim()}
+							>
+								Send
+							</button>
+						</div>
+					)}
+				</div>
+			)}
 
 			<div className="input-area">
 				<input
@@ -894,12 +981,12 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 						}
 					}}
 					placeholder="Ask away!"
-					disabled={isBusy}
+					disabled={isBusy || !!clarificationRequest}
 					autoFocus
 				/>
 				<button
 					onClick={() => fileInputReference.current?.click()}
-					disabled={isBusy}
+					disabled={isBusy || !!clarificationRequest}
 					className="attach-button"
 				>
 					Attach
@@ -909,7 +996,7 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 						Stop
 					</button>
 				)}
-				<button onClick={handleSend} disabled={isBusy || (!inputValue.trim() && pendingAttachments.length === 0)}>
+				<button onClick={handleSend} disabled={isBusy || !!clarificationRequest || (!inputValue.trim() && pendingAttachments.length === 0)}>
 					Send
 				</button>
 			</div>

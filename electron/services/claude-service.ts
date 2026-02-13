@@ -89,7 +89,12 @@ export class ClaudeService {
 		onDebugLog?: (type: 'query' | 'tool' | 'api' | 'error' | 'info', category: string, message: string, details?: string) => void,
 		onEvent?: (event: unknown) => void,
 		abortController?: AbortController,
-	): Promise<{ shortAnswer: string; detailedAnswer: string; suggestedTitle?: string }> {
+	): Promise<{ shortAnswer: string; detailedAnswer: string; suggestedTitle?: string } | {
+		needsClarification: true;
+		question: string;
+		options?: string[];
+		allowFreeText?: boolean
+	}> {
 		const detectDesiredDetailLevel = (text: string): 'short' | 'medium' | 'detailed' => {
 			const t = text.toLowerCase();
 
@@ -115,6 +120,38 @@ export class ClaudeService {
 			// Danish + English UI intent keywords
 			return /(\bhvordan\b|\bhvor\b|\bklik\b|\bknap\b|\bmenu\b|\bfane\b|\bfelt\b|\bside\b|\bskærm\b|\bui\b|\binterface\b|\bfind\b|\bopret\b|\bredig(é|e)r\b|\bslet\b|\bfilter\b|\bsøg\b|\bexport\b|\budtræk\b|\boversigt\b|\bwhy\b|\bwhere\b|\bbutton\b|\bmenu\b|\bpage\b|\bfield\b)/i
 				.test(t);
+		};
+
+		/**
+		 * Detect if the question is about setting up or configuring an integration.
+		 * These questions MUST search the codebase first to give the COMPLETE picture with ALL critical steps.
+		 * Integration setups often have non-obvious requirements (config tables, API keys, webhooks, linking).
+		 */
+		const detectsIntegrationSetupQuestion = (text: string): boolean => {
+			const t = text.toLowerCase();
+
+			// Setup/configuration intent
+			const setupIntent = /\b(opsæt|opsætte|opsætter|setup|oprette|konfigurer|configure|knytte|knytter|connect|link|forbinde|tilkoble|integrat|integration)\b/i.test(t);
+
+			// Known SPY integrations
+			const integrationMention = /\b(shopify|pos|woocommerce|sitoo|edi|nemedi|dhl|ups|fedex|gls|postnord|bring|webhook|api\s+key)\b/i.test(t);
+
+			// "How do I set up X in Spy" or "how to connect X to Y"
+			if (setupIntent && integrationMention) {
+				return true;
+			}
+
+			// Explicit "how to set up [integration]" patterns
+			if (/\b(hvordan|how)\s+(opsætter|set\s+up|setup|konfigurerer|configure)\s+(jeg|i|we)?\s*(shopify|pos|woo|sitoo|edi|integration)/i.test(t)) {
+				return true;
+			}
+
+			// "knytter til min shop" / "connect to my shop"
+			if (/\b(knytte|connect|link)\s+(til|to)\s+(min|mit|my)\s*(shop|butik)/i.test(t)) {
+				return true;
+			}
+
+			return false;
 		};
 
 		/**
@@ -285,6 +322,25 @@ export class ClaudeService {
 			return lines.join('\n');
 		};
 
+		const formatIntegrationCodeSearchResults = (results: Array<{ path: string; matches: string[] }>): string => {
+			if (!results || results.length === 0) {
+				return '';
+			}
+			const lines: string[] = [];
+			lines.push('SETUP/HOW-TO CODE SEARCH RESULTS (SPY REPO)');
+			lines.push('Use these to document ALL setup steps. Do NOT skip critical config, webhooks, or linking logic.');
+			for (const r of results.slice(0, 8)) {
+				lines.push(`- ${r.path}`);
+				for (const m of (r.matches || []).slice(0, 4)) {
+					const frag = String(m || '').replace(/\s+/g, ' ').trim();
+					if (frag) {
+						lines.push(`  - ${frag}`);
+					}
+				}
+			}
+			return lines.join('\n');
+		};
+
 		// Get database connection info for context
 		let dbServerHost = '';
 		if (dbHostOverride && String(dbHostOverride).trim() !== '') {
@@ -314,7 +370,7 @@ export class ClaudeService {
 		onProgress?.('Preparing tools...');
 
 		const queryResults: Array<{ query: string; data: any[] }> = [];
-		const {tools, resetSearchCounter}                          = await createClaudeTools({
+		const {tools, resetSearchCounter}                         = await createClaudeTools({
 			databaseService,
 			githubService,
 			schemaIndexService,
@@ -341,21 +397,32 @@ export class ClaudeService {
 			}
 		}
 
-		// Add the new user message (with optional attachments)
-		let userText                                                                                                     = userMessage;
-		const contentBlocks: Array<{ type: string; content?: string; source?: { type: 'url' | 'data'; value: string } }> = [];
+		// Add the new user message (with optional attachments).
+		// TanStack AI ContentPart format:
+		//   TextPart:  { type: 'text', content: string }
+		//   ImagePart: { type: 'image', source: { type: 'data' | 'url', value: string }, metadata?: { mediaType } }
+		let userText = userMessage;
+		const contentBlocks: Array<{
+			type: string;
+			content?: string;
+			source?: { type: 'url' | 'data'; value: string };
+			metadata?: { mediaType?: string };
+		}>           = [];
 		try {
 			if (attachments && attachments.length > 0) {
 				onProgress?.(`Processing ${attachments.length} attachment(s)...`);
 				for (const att of attachments) {
 					if (att.mimeType && att.mimeType.startsWith('image/')) {
-						const buf     = await attachmentService.readAttachmentBuffer(att.storedPath);
-						const dataUrl = `data:${att.mimeType};base64,${buf.toString('base64')}`;
+						const buf    = await attachmentService.readAttachmentBuffer(att.storedPath);
+						const base64 = buf.toString('base64');
 						contentBlocks.push({
-							type  : 'image',
-							source: {
-								type : 'url',
-								value: dataUrl,
+							type    : 'image',
+							source  : {
+								type : 'data',
+								value: base64,
+							},
+							metadata: {
+								mediaType: att.mimeType as string,
 							},
 						});
 						continue;
@@ -414,6 +481,50 @@ export class ClaudeService {
 			}
 		} catch (error) {
 			onDebugLog?.('error', 'UI Grounding', 'UI code search failed', String(error));
+		}
+
+		/**
+		 * Broader: any "how to" or "setup" question that benefits from code search.
+		 * Includes integration setup but also generic "hvordan gør jeg X", "where do I configure Y".
+		 */
+		const looksLikeSetupOrHowToQuestion = (text: string): boolean => {
+			const t        = text.toLowerCase();
+			const setupHow = /\b(hvordan|how)\s+(opsætter|gør|konfigurerer|set\s+up|setup|configure|do\s+i)\b/i.test(t)
+				|| /\b(where|hvor)\s+(do\s+i|finder|kan\s+jeg|opretter|konfigurerer)\b/i.test(t)
+				|| /\b(opsæt|opsætte|konfigurer|setup)\s+(jeg|i|we)?\s*(spy|systemet)?/i.test(t);
+			return setupHow || detectsIntegrationSetupQuestion(text);
+		};
+
+		// For integration/setup/how-to questions, proactively search for config, webhooks, linking logic.
+		let integrationCodeSearchSection = '';
+		try {
+			const isIntegrationOrSetup = looksLikeSetupOrHowToQuestion(userMessage);
+			if (isIntegrationOrSetup) {
+				await githubService.getConfig();
+				onProgress?.('Searching integration codebase...');
+				const keywords               = extractSearchKeywords(userMessage, 4);
+				// Integration-specific: add terms that often appear in setup code
+				const integrationTerms       = ['setup', 'config', 'webhook', 'connect', 'integration', 'pos', 'shopify', 'consignment'];
+				const match                  = userMessage.match(/\b(shopify|pos|woocommerce|sitoo|edi|nemedi|webhook)\b/gi);
+				const integrationNames       = match ? [...new Set(match.map((m) => m.toLowerCase()))] : [];
+				const queryParts             = [...keywords, ...integrationNames, ...integrationTerms.slice(0, 2)];
+				const query                  = Array.from(new Set(queryParts)).slice(0, 6).join(' ');
+				const integrationResults     = await githubService.searchCode(query);
+				integrationCodeSearchSection = formatIntegrationCodeSearchResults(integrationResults);
+				if (integrationResults.length > 0) {
+					onDebugLog?.('info', 'Setup/How-to Grounding', `Found ${integrationResults.length} code search results for: ${query}`);
+				} else {
+					integrationCodeSearchSection = [
+						'SETUP/HOW-TO CODE SEARCH RESULTS (SPY REPO)',
+						`Query: ${query}`,
+						'Results: NONE',
+						'RULE: You MUST still use search_code/search_code_context in the tool loop to find the actual setup. Do NOT skip. Try alternative search terms (e.g. config, webhook, setup).',
+					].join('\n');
+					onDebugLog?.('info', 'Setup/How-to Grounding', `No code search results for: ${query}`);
+				}
+			}
+		} catch (error) {
+			onDebugLog?.('error', 'Integration Grounding', 'Integration code search failed', String(error));
 		}
 
 		onProgress?.('Searching knowledge base...');
@@ -526,6 +637,12 @@ KEY PATTERNS:
 - TS Controller: Makes AJAX call via new Get<HTMLResponseData>('Controller\\Path', 'MethodName')
 - PHP Controller: Returns HTML fragment displayed in showDialog() (jQuery UI Dialog)
 - Action files: modules/[module]/action.php (switch on mode), action_*.php, or _action.php
+
+FIELD VISIBILITY (CRITICAL):
+- Dialogs/forms often have DIFFERENT fields for Create vs Edit mode. A field visible when editing may NOT exist when creating.
+- Search for: conditional rendering, v-if, display logic, mode checks (isNew, isEdit, mode === 'create' vs 'edit').
+- When listing form fields, ALWAYS state in which context each field appears: "Visible when creating" vs "Visible when editing" vs "Always visible".
+- Do NOT assume all fields are visible at once. Check the code for visibility conditions.
 `
 			: '';
 
@@ -545,16 +662,53 @@ DO NOT answer without querying the database first. DO NOT say "I don't have acce
 `
 			: '';
 
+		// Detect if question is about integration setup (Shopify, POS, WooCommerce, etc.)
+		const requiresIntegrationFocus = detectsIntegrationSetupQuestion(userMessage);
+		if (requiresIntegrationFocus) {
+			onDebugLog?.('info', 'Detection', 'Integration setup question detected - will require code-grounded complete answer');
+		}
+		const integrationDirective = requiresIntegrationFocus
+			? `
+**MANDATORY: THIS IS AN INTEGRATION SETUP QUESTION - GIVE THE COMPLETE PICTURE**
+The user is asking how to set up or configure an integration (e.g. Shopify POS, WooCommerce, Sitoo).
+You MUST:
+1. use search_code_context / search_code to find ALL setup-related code: config forms, webhook registration, API keys, database tables, linking logic
+2. read_file on the relevant files to extract the EXACT steps (menus, fields, checkboxes, prerequisites)
+3. Include EVERY critical step - do NOT skip "obvious" or "assumed" steps. Integration setups often fail because of missed config like webhook URLs, API credentials, or brand/shop linking
+4. Search for: setup wizards, config pages, webhook handlers, shop-to-brand mapping, API key storage
+5. **DIG DEEPER**: Read multiple files, trace the flow. Verify claims (e.g. "orders are created automatically") in the code before stating them. Distinguish configurable fields (user can type) from display-only fields (read-only, backend data) — only include configurable fields in setup steps. Do NOT include database table/column names in support answers.
+6. If you find database tables for integration config, use search_schema + query_database to document required fields
+7. **CONSIGNMENT CHECK (ESSENTIAL for POS/Shopify)**: Search for consignment requirements. For Shopify POS and similar integrations, the customer MUST typically be a consignment customer (customers.is_consignment_customer). Include this in the setup steps.
+8. **NO INVENTED STEPS**: Only document steps you found in the code. Do NOT add steps from Shopify's documentation or general knowledge (e.g. "Create Special Styles", "Gift Wrap Style") unless you SAW them in SPY code. Invented menu paths mislead users.
+
+CRITICAL: Do NOT give a narrow answer that omits essential details. The user needs the FULL setup flow from the actual codebase.
+If you are unsure about a step, search for it - do not assume.
+
+**CLARIFYING QUESTIONS:**
+Feel free to ask clarifying questions whenever it would help tailor the answer (e.g. "Do you already have a Shopify shop set up?", which module, new vs existing setup, online vs POS).
+`
+			: '';
+
 		// Build system prompt
-		if (codeFirstDirective || databaseDirective || handlerDirective) {
+		if (codeFirstDirective || databaseDirective || handlerDirective || integrationDirective) {
 			const activeDirectives: string[] = [];
 			if (codeFirstDirective) activeDirectives.push('CODE_FIRST');
 			if (handlerDirective) activeDirectives.push('HANDLER_NAV');
 			if (databaseDirective) activeDirectives.push('DATABASE_REQUIRED');
+			if (integrationDirective) activeDirectives.push('INTEGRATION_COMPLETE');
 			onDebugLog?.('info', 'System Prompt', `Active directives: ${activeDirectives.join(', ')}`);
 		}
 		let systemPrompt = `You are a helpful assistant that answers questions accurately and clearly. ALWAYS respond in the same language as the user's question.
-${codeFirstDirective}${handlerDirective}${databaseDirective}
+${codeFirstDirective}${handlerDirective}${databaseDirective}${integrationDirective}
+
+RESEARCH & THOROUGHNESS (ALWAYS — applies to EVERY question):
+- The SPY codebase and database are the source of truth. Always search before answering. Do not rely on general knowledge.
+- For setup, configuration, how-to, or "where do I..." questions: search the code and include ALL steps. Never skip critical details (webhooks, API keys, config screens, prerequisites, linking).
+- Do not assume "obvious" steps — what is obvious in code may not be obvious to the user. Complete answers prevent follow-up frustration.
+- When explaining behavior: cite the actual code path. When explaining setup: document every step you find in the code.
+- If you cannot find something in the code, say so explicitly. Do not invent steps.
+- **DIG DEEPER**: Quality over speed. Use multiple search_code calls, read_file on several files, trace the actual code flow. Do NOT stop at the first result — verify behavior (e.g. "automatic order creation") by reading the code before stating it. Wrong claims mislead users.
+
 RESPONSE STYLE (CRITICAL):
 - Use tools silently. Do NOT narrate your process in the answer.
 - FORBIDDEN phrases (NEVER include these in your answer):
@@ -569,14 +723,23 @@ RESPONSE STYLE (CRITICAL):
   * Any sentence describing what YOU are doing (searching, reading, checking)
 - Do NOT output thinking/reasoning text. Only output conclusions, steps, and grounded findings.
 - Start directly with the answer or solution. No process narration.
-- NEVER stop after a "planning" sentence. Always provide a concrete answer, or ask ONE clarifying question if impossible.
+- NEVER stop after a "planning" sentence. Always provide a concrete answer, or ask a clarifying question when that would lead to a better answer.
+
+CLARIFYING QUESTIONS (use ask_clarifying_question tool — use it freely):
+- You are encouraged to ask clarifying questions whenever it would help you give a better, more relevant answer. Do NOT hesitate.
+- Use when: the question could mean several things; context would tailor the answer (which system, which module, online vs POS, new vs existing); you want to confirm scope before diving in; or a quick question would save the user from a long, generic answer.
+- Do NOT use for: information you can look up in code/database (search_code, query_database).
+- Keep the question short. Provide 2–4 clickable options when possible (e.g. ["Online shop", "POS terminal", "Both"]). Set allowFreeText: true to let users type a custom answer.
+- When in doubt, ask. A focused question often leads to a much better answer than guessing.
 
 GROUNDING & ACCURACY (CRITICAL):
 - NEVER invent file paths, function names, class names, SQL queries, or UI labels.
+- NEVER invent menu paths, navigation steps, or "Settings → X → Y" that you did not see in the code. If you cannot find "Settings → Integration → Shopify → Create Special Styles" (or similar) in search_code/read_file, DO NOT include it. Invented paths mislead users.
 - Only claim a file/function/label exists if you saw it in tool output (search_code/read_file/describe_table/query results) during THIS run.
 - If UI code search results are empty, say so and ask for the exact module/page name (English SPY UI label) or a screenshot.
 - When explaining code behavior, cite the exact file path(s) you saw in tool output. If you cannot cite any file path, do NOT claim code details.
-- When you use search_code, do at most 2 searches, then pick the best file and use read_file. Do NOT loop search_code repeatedly.
+- When you use search_code, pick the best file and use read_file. Do NOT loop search_code repeatedly without reading files.
+- For setup/config/how-to questions: search for each relevant area (config UI, webhooks, API setup, linking) and read the files. Thoroughness over speed.
 - Prefer search_code_context for code navigation: it returns grounded excerpts with line numbers so you can answer without guessing.
 
 NO WRITE ACTIONS (CRITICAL):
@@ -645,10 +808,19 @@ CRITICAL BUSINESS LOGIC KNOWLEDGE:
 - "Active" for most entities means disabled = 0 (NOT a column called "active" or "is_active")
 - Always check the schema FIRST because column names vary per table
 
+CONSIGNMENT (CRITICAL - affects many areas):
+- Consignment is used throughout SPY: orders, customers, stock, integrations.
+- For POS integrations (Shopify POS, etc.): the customer/shop MUST be a consignment customer.
+  Check customers.is_consignment_customer = true. This is often a HARD requirement.
+- When answering integration setup, order flow, or customer-related questions: ALWAYS check if consignment has an impact.
+- Search for: is_consignment_customer, consignment, skip_consignment, is_consignment_end_delivery.
+- Do NOT omit consignment requirements. Many setups fail because the customer was not a consignment customer.
+
 CODE SEARCH (search_code_context) for:
 - "How does X work in code", "Where is the setting for Z"
 - Business logic explanations (after getting the data first)
 - UI navigation guidance
+- Setup, configuration, how-to: search for ALL relevant parts (config forms, webhooks, API keys, linking). Give the complete picture.
 
 FORBIDDEN BEHAVIORS:
 - Do NOT ask the user for order_id, customer_id, or other data you can query yourself.
@@ -657,8 +829,8 @@ FORBIDDEN BEHAVIORS:
 - Do NOT ask "which database" or "which order" when there's clearly an ID in the message.
 - Do NOT ask the user "where in the system" or "can you show me the code" - you have FULL ACCESS to the entire codebase via search_code, search_code_context, read_file, and list_files. USE THEM.
 - Do NOT say "to confirm this, I would need to see..." - just search for it and read it yourself.
-- If your first search didn't find what you need, try different search terms, file paths, or read_file on files you already found. You can search up to 10 times per question.
-- Only ask a clarifying question when ALL tools have FAILED and returned no useful data after multiple attempts.
+- If your first search didn't find what you need, try different search terms, file paths, or read_file on files you already found. Quality over speed — use as many searches as needed.
+- Do NOT stop after one or two searches. Trace the flow: read the handler, then the service, then the queue/processor. Verify behavior in code before stating it (e.g. "orders are created automatically" — only say if you found that in the code).
 
 PAGE/MODULE QUESTIONS (CRITICAL):
 When a user asks "why does this page show X" or "why is the data different on page Y":
@@ -699,6 +871,10 @@ User: "Confident/Topsellers shows wrong season"
 WRONG: Query seasons table with your own logic
 RIGHT: 1) search_code("Topsellers") → 2) find the season selection code → 3) run same query → 4) explain
 
+User: "Hvordan opsætter jeg Shopify POS i Spy og knytter den til min shop?"
+WRONG: Give a high-level overview and skip webhook URLs, API keys, config tables, shop-to-brand linking, or consignment requirement
+RIGHT: 1) search_code("shopify pos" or "shopify_pos") → 2) find config UI, webhook handlers, API setup → 3) read_file on each relevant file → 4) search for consignment requirement (is_consignment_customer) → 5) document ALL steps including: customer must be consignment customer, prerequisites, menus, fields, webhook registration
+
 CODE ANALYSIS RULE:
 When reading or analyzing code (from GitHub, database queries, or any source):
 - ALWAYS ignore all comments in the code
@@ -732,7 +908,17 @@ When a file is too large and gets truncated (>500 lines):
 		}
 
 		if (workingSummaryText) {
-			systemPrompt += `\n\nWORKING SUMMARY (CHAT MEMORY):\n${workingSummaryText}\n\nUse this as current chat context. If you discover a contradiction, prioritize tool output and update your internal understanding.`;
+			systemPrompt += `\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WORKING SUMMARY (CHAT MEMORY — READ THIS FIRST)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+${workingSummaryText}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+NOTE: Table and column names in this summary are from PREVIOUS conversation turns.
+- Use them as HINTS for where to look, but ALWAYS verify with search_schema or get_table_schema_cached before writing SQL.
+- Database schemas can differ between systems — never assume a table/column exists just because it is mentioned here.
+- If a query fails with "table doesn't exist", the summary may be outdated — search for the correct name.
+- If you find a contradiction between the summary and a tool result, ALWAYS trust the tool result.`;
 		}
 
 		// Add relevant context from vector store
@@ -748,6 +934,11 @@ When a file is too large and gets truncated (>500 lines):
 		// Add UI code grounding context (if present)
 		if (uiCodeSearchSection) {
 			systemPrompt += `\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n${uiCodeSearchSection}\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+		}
+
+		// Add integration code grounding context (if integration setup question)
+		if (integrationCodeSearchSection) {
+			systemPrompt += `\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n${integrationCodeSearchSection}\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
 		}
 
 		if (databaseName && databaseIds.length > 0) {
@@ -836,6 +1027,10 @@ When asked about a dialog/modal:
 2. Look for the Get/Post call that fetches the dialog HTML
 3. Read the PHP controller method that generates the dialog content
 
+When asked which fields a form/dialog shows:
+4. Search for conditional visibility: v-if, v-show, display, isNew, isEdit, mode === 'create' vs 'edit'
+5. Some fields are only in Create mode, others only in Edit mode. Document which is which.
+
 LOCAL SCHEMA INDEX:
 ${schemaIndexInfo?.exists
 				? `- Status: AVAILABLE\n- Generated: ${schemaIndexInfo.generatedAtIso}\n- Tables: ${schemaIndexInfo.tableCount}\n- Source: ${schemaIndexInfo.source}\n- IMPORTANT: Prefer schema-index tools (search_schema / get_table_schema_cached) with dbId for table/column discovery.`
@@ -858,7 +1053,7 @@ IMPORTANT QUERY RULES:
    - Always use the actual database tables directly instead of BI views
    - If you see a table name starting with "bi_", ignore it and find the equivalent regular table
 
-2. Common table patterns in SPY system:
+2. Common table NAME PATTERNS in SPY system (these are HINTS — verify with search_schema before use!):
    - customer: Customer data
    - orders: Order headers
    - orders_lines: Order line items
@@ -868,10 +1063,15 @@ IMPORTANT QUERY RULES:
    - shipping: Shipping/delivery information
    - brand: Brand information
    - season: Season definitions
+   NOTE: Actual table names may differ (e.g. "p_shipping" not "shipping"). ALWAYS search first.
 
-3. Prefer the LOCAL schema index tools first:
+3. MANDATORY TABLE VERIFICATION (prevents hallucinated table names):
+   - BEFORE writing ANY SQL query, ALWAYS verify the table exists using search_schema or get_table_schema_cached
+   - NEVER guess or assume table/column names — even if mentioned in conversation history or working summary
+   - If you used a table 2 messages ago, you STILL must verify it exists before querying it again
+   - Common mistake: inventing tables like "p_order_styles_sizes" or "shipping_details" that don't exist
    - Use search_schema with dbId to discover the correct table/column names
-   - Use get_table_schema_cached with dbId to verify columns and keys
+   - Use get_table_schema_cached with dbId to verify columns and keys before writing SQL
    - If the index is missing, ask the user to generate it in Settings → Database Connection → Database Schema Index
    - Only use describe_table with dbId when the local index is missing or looks outdated
 
@@ -909,9 +1109,16 @@ ALWAYS provide step-by-step UI instructions with specific button names and menu 
 
 CRITICAL UI ACCURACY RULES:
 - NEVER guess UI labels, button names, menu names, or field names.
+- NEVER invent menu paths like "Settings → Integration → Shopify → Create Special Styles" unless you SAW that exact path in the code. If you cannot find it in search_code/read_file, omit the step or say "I could not locate this in the SPY codebase."
 - If an image/screenshot is provided, quote the exact labels you can see.
 - If no screenshot is provided, use code search results (if present) to ground exact labels.
 - If you still cannot ground the UI labels, ask ONE clarifying question (e.g. \"Which page are you on?\" or \"Please paste a screenshot\").
+
+SPY TERMINOLOGY (NEVER TRANSLATE):
+- SPY uses English terms in the system. NEVER translate them to Danish or other languages.
+- Keep these terms in English: consignment, POS, B2B, B2C, EDI, style, assortment, brand, season, shipment, packing, claim, return.
+- WRONG: "konsignation" (use "consignment"), "punkt-salgs" (use "POS"), "assortiment" (use "assortment" when referring to SPY entities).
+- RIGHT: "consignment-kunde", "POS-integration", "Shopify POS" — keep the SPY term in English.
 
 **Good Example:**
 "For at oprette en ny style:
@@ -932,6 +1139,28 @@ CRITICAL UI ACCURACY RULES:
 - Keyboard shortcuts if known (e.g., "Ctrl+S to save")
 - Tab names if relevant
 - Modal/dialog names
+
+**CHECKBOXES & TOGGLES (CRITICAL):**
+When describing form fields or settings:
+- NEVER show raw 1 or 0 to users for boolean/checkbox/toggle values.
+- Use human-readable labels: "Slået til" / "Slået fra" (Danish) or "Enabled" / "Disabled" (English).
+- Match the user's language. When explaining a setting, say e.g. "Sæt til **Slået til**" not "Sæt til 1".
+
+**CONDITIONAL FIELD VISIBILITY:**
+- Forms/dialogs often show different fields for Create vs Edit. A field may exist only when editing, not when creating.
+- When listing form fields, state the context: "Visible when creating" vs "Visible when editing" vs "Always visible".
+- Do NOT assume all fields are visible at once. Check the code for v-if, display logic, mode checks (isNew, isEdit).
+- This prevents confusion when a user says "I don't see that field" — they may be in Create mode.
+
+**CONFIGURABLE vs DISPLAY-ONLY FIELDS (CRITICAL):**
+- Before including a field in setup steps: check the code for disabled, readOnly, readonly, or display-only. If the user cannot type in it or change it, do NOT tell them to "configure" it.
+- Editable fields (include in setup): API key, password, access token — when the form allows input. Shopify shop credentials, webhook URLs, etc.
+- Display-only fields (omit from setup): API Key ID (internal reference), generated tokens shown for info only, IDs the user cannot edit. These are backend data for reference — the customer cannot use them.
+- The same label (e.g. "API") may appear in both contexts. Check the code: is it an input or a read-only display?
+
+**NO DATABASE STRUCTURE IN SUPPORT ANSWERS:**
+- Support staff do NOT need table names, column names, or database structure. Omit these from setup/how-to answers.
+- Only mention database tables/columns when the user is clearly a developer or explicitly asks for technical details.
 
 **For technical tasks:**
 - Include file paths when asked (e.g., "src/Components/StyleManager.tsx")
@@ -983,14 +1212,17 @@ OUTPUT RULES
 
 		// Always use streaming for the technical phase to properly capture tool calls and text.
 		// Using stream: false returns empty string when the model only produces tool calls.
-		let detailedAnswer = '';
+		let detailedAnswer                                                                                 = '';
+		let agentLoopExhausted                                                                             = false;  // true when the agent loop hit maxIterations
+		let iterationCount                                                                                 = 0;
+		let clarificationRequest: { question: string; options?: string[]; allowFreeText?: boolean } | null = null;
 		{
 			const stream = chat({
 				adapter          : createAnthropicChat('claude-sonnet-4-5', apiKey),
 				messages,
 				tools,
 				systemPrompts    : [systemPrompt],
-				agentLoopStrategy: maxIterations(20),
+				agentLoopStrategy: maxIterations(75),
 				maxTokens        : 32_000,
 				abortController,
 				modelOptions     : {
@@ -1020,6 +1252,25 @@ OUTPUT RULES
 					if (evt.type === 'TOOL_CALL_END') {
 						const details = evt.result ? String(evt.result) : '';
 						onDebugLog?.('tool', 'Tool Call', `Completed tool: ${evt.toolName || 'unknown'}`, details);
+						// Check for clarification request (Cursor-style follow-up)
+						if (evt.toolName === 'ask_clarifying_question' && evt.result) {
+							const res = typeof evt.result === 'string' ? (() => {
+								try {
+									return JSON.parse(evt.result);
+								} catch {
+									return null;
+								}
+							})() : evt.result;
+							if (res && (res as any).__clarificationRequest) {
+								clarificationRequest = {
+									question     : (res as any).question,
+									options      : (res as any).options,
+									allowFreeText: (res as any).allowFreeText !== false,
+								};
+								onDebugLog?.('info', 'Clarification', 'AI requested clarification, returning early');
+								break;
+							}
+						}
 						continue;
 					}
 					if (evt.type === 'STEP_STARTED') {
@@ -1032,11 +1283,18 @@ OUTPUT RULES
 						continue;
 					}
 					if (evt.type === 'RUN_STARTED') {
-						onDebugLog?.('info', 'Claude API', 'Agent loop iteration started');
+						iterationCount++;
+						onDebugLog?.('info', 'Claude API', `Agent loop iteration ${iterationCount} started`);
 						continue;
 					}
 					if (evt.type === 'RUN_FINISHED') {
-						onDebugLog?.('info', 'Claude API', `Agent loop finished (reason: ${evt.finishReason || 'unknown'})`);
+						const reason = evt.finishReason || 'unknown';
+						onDebugLog?.('info', 'Claude API', `Agent loop finished (reason: ${reason}, iterations: ${iterationCount})`);
+						// Detect if the agent loop was exhausted (hit maxIterations)
+						if (reason === 'max_turns' || reason === 'maxIterations' || reason === 'max_iterations') {
+							agentLoopExhausted = true;
+							onDebugLog?.('info', 'Claude API', 'Agent loop EXHAUSTED max iterations — will run completion step');
+						}
 						continue;
 					}
 					if (evt.type === 'RUN_ERROR') {
@@ -1050,13 +1308,94 @@ OUTPUT RULES
 			}
 
 			detailedAnswer = detailedAnswer.trim();
-			onDebugLog?.('info', 'Technical Response', `Streaming complete, text length: ${detailedAnswer.length}`);
+			onDebugLog?.('info', 'Technical Response', `Streaming complete, text length: ${detailedAnswer.length}, iterations: ${iterationCount}, exhausted: ${agentLoopExhausted}`);
+		}
+
+		// Early return if AI asked for clarification (Cursor-style follow-up)
+		if (clarificationRequest) {
+			return {
+				needsClarification: true,
+				question          : clarificationRequest.question,
+				options           : clarificationRequest.options,
+				allowFreeText     : clarificationRequest.allowFreeText !== false,
+			};
 		}
 
 		detailedAnswer = sanitizeAssistantAnswer(detailedAnswer);
 
-		// Also check if the question required database but no queries were executed
-		const requiredDatabaseButNoQueries = requiresDatabase && queryResults.length === 0;
+		// ── Completion guarantee ──────────────────────────────────────────────────
+		// When the agent loop was exhausted (hit maxIterations) or the answer is
+		// clearly mid-investigation, give Claude one final chance to wrap up with
+		// all the data it has gathered so far.
+		const looksIncomplete = agentLoopExhausted || looksLikeMidInvestigation(detailedAnswer);
+		if (looksIncomplete && queryResults.length > 0) {
+			onDebugLog?.('info', 'Completion Guarantee', `Answer looks incomplete (exhausted=${agentLoopExhausted}, midInvestigation=${looksLikeMidInvestigation(detailedAnswer)}). Running completion step with ${queryResults.length} query results.`);
+			onProgress?.('Finishing analysis...');
+
+			try {
+				// Build a compact summary of ALL query results gathered during the investigation
+				const queryDataSummary = queryResults.map((qr, i) => {
+					const preview = qr.data.length > 10
+						? JSON.stringify(qr.data.slice(0, 10)) + `\n... (${qr.data.length} rows total)`
+						: JSON.stringify(qr.data);
+					return `Query ${i + 1}: ${qr.query}\nRows: ${qr.data.length}\nData: ${preview}`;
+				}).join('\n\n');
+
+				const completionPrompt = `You were in the middle of investigating a question but ran out of steps.
+
+Here is everything you found so far. USE THIS DATA to provide a COMPLETE, CONCLUSIVE answer.
+
+ORIGINAL QUESTION:
+${userMessage}
+
+YOUR INVESTIGATION SO FAR:
+${detailedAnswer.length > 3000 ? detailedAnswer.substring(detailedAnswer.length - 3000) : detailedAnswer}
+
+ALL DATABASE QUERY RESULTS YOU OBTAINED (${queryResults.length} queries):
+${queryDataSummary}
+
+RULES:
+- Answer in the SAME LANGUAGE as the user's question.
+- Provide a COMPLETE answer based on the data above.
+- Include specific numbers from the query results.
+- Do NOT say you need more data — use what you have.
+- Do NOT narrate your process. Just give the answer.
+- If some queries returned empty results, mention what was NOT found.
+- If you can draw a conclusion from the data, do so clearly.`;
+
+				let completionText     = '';
+				const completionStream = chat({
+					adapter          : createAnthropicChat('claude-sonnet-4-5', apiKey),
+					messages         : [...messages, {role: 'assistant', content: detailedAnswer}, {role: 'user', content: completionPrompt}],
+					tools,
+					systemPrompts    : [systemPrompt],
+					agentLoopStrategy: maxIterations(10),
+					maxTokens        : 16_000,
+					abortController,
+				});
+				for await (const event of completionStream) {
+					const evt = event as any;
+					if (evt.type === 'TEXT_MESSAGE_CONTENT' && typeof evt.delta === 'string') {
+						completionText += evt.delta;
+					}
+				}
+				const completed = sanitizeAssistantAnswer(completionText.trim());
+				if (completed && completed.length > 50) {
+					// Append the completion to the detailed answer so the full investigation is preserved
+					detailedAnswer = sanitizeAssistantAnswer(`${detailedAnswer}\n\n${completed}`);
+					onDebugLog?.('info', 'Completion Guarantee', `Completion step produced ${completed.length} chars`);
+				} else {
+					onDebugLog?.('info', 'Completion Guarantee', 'Completion step produced insufficient output — keeping original');
+				}
+			} catch (error) {
+				onDebugLog?.('error', 'Completion Guarantee', 'Completion step failed', String(error));
+			}
+		}
+
+		// Also check if the question required database but no queries were executed.
+		// EXCEPTION: Integration setup questions are answered from CODE; database is optional (schema/config examples).
+		// Forcing a DB retry on integration setup can cause poor retry output (e.g. "Jeg vil undersøge...") and lose the good code-based answer.
+		const requiredDatabaseButNoQueries = requiresDatabase && queryResults.length === 0 && !requiresIntegrationFocus;
 		if (requiredDatabaseButNoQueries) {
 			onDebugLog?.('info', 'Claude API', 'Question required database but no queries were made - forcing retry with database tools');
 		}
@@ -1084,11 +1423,11 @@ You MUST:
 DO NOT ANSWER WITHOUT QUERYING THE DATABASE FIRST.`
 					: '';
 
-			const retryMessages: ChatMessage[] = [
-				...messages,
-				{
-					role   : 'user',
-					content: `Your previous answer was not useful.${forceToolUseDirective}${queryResultsSummary}
+				const retryMessages: ChatMessage[] = [
+					...messages,
+					{
+						role   : 'user',
+						content: `Your previous answer was not useful.${forceToolUseDirective}${queryResultsSummary}
 
 RULES:
 - Answer in the SAME LANGUAGE as the user's question.
@@ -1098,31 +1437,36 @@ RULES:
 - Do NOT ask for order_id, database ID, or other information you can query.
 
 ${requiredDatabaseButNoQueries ? 'USE get_table_schema_cached AND query_database NOW, THEN provide the answer with the REAL numbers from the query.' : 'PROVIDE THE FINAL ANSWER NOW using the data you found.'}`,
-				},
-			];
+					},
+				];
 
-			// Use streaming to properly capture tool calls and text
-			let retryText = '';
-			const retryStream = chat({
-				adapter          : createAnthropicChat('claude-sonnet-4-5', apiKey),
-				messages         : retryMessages,
-				tools,
-				systemPrompts    : [systemPrompt],
-				agentLoopStrategy: maxIterations(6),
-				maxTokens        : 32_000,
-				abortController,
-			});
-			for await (const event of retryStream) {
-				const evt = event as any;
-				if (evt.type === 'TEXT_MESSAGE_CONTENT' && typeof evt.delta === 'string') {
-					retryText += evt.delta;
+				// Use streaming to properly capture tool calls and text
+				let retryText     = '';
+				const retryStream = chat({
+					adapter          : createAnthropicChat('claude-sonnet-4-5', apiKey),
+					messages         : retryMessages,
+					tools,
+					systemPrompts    : [systemPrompt],
+					agentLoopStrategy: maxIterations(6),
+					maxTokens        : 32_000,
+					abortController,
+				});
+				for await (const event of retryStream) {
+					const evt = event as any;
+					if (evt.type === 'TEXT_MESSAGE_CONTENT' && typeof evt.delta === 'string') {
+						retryText += evt.delta;
+					}
 				}
-			}
-			const retried = sanitizeAssistantAnswer(retryText.trim());
-			onDebugLog?.('info', 'Technical Retry', `Streaming complete, text length: ${retried?.length || 0}`);
-			if (retried) {
-				detailedAnswer = retried;
-			}
+				const retried = sanitizeAssistantAnswer(retryText.trim());
+				onDebugLog?.('info', 'Technical Retry', `Streaming complete, text length: ${retried?.length || 0}`);
+				// Don't replace a substantial answer with a very short retry (e.g. "Jeg vil undersøge...")
+				if (retried) {
+					if (retried.length < 150 && detailedAnswer.length > 500) {
+						onDebugLog?.('info', 'Technical Retry', `Retry too short (${retried.length} chars); keeping original (${detailedAnswer.length} chars)`);
+					} else {
+						detailedAnswer = retried;
+					}
+				}
 			} catch (error) {
 				onDebugLog?.('error', 'Claude API', 'Technical retry failed', String(error));
 			}
@@ -1130,7 +1474,13 @@ ${requiredDatabaseButNoQueries ? 'USE get_table_schema_cached AND query_database
 		if (looksTruncatedAnswer(detailedAnswer)) {
 			onDebugLog?.('info', 'Claude API', 'Technical answer looks truncated; requesting continuation');
 			try {
-				const tail               = detailedAnswer.slice(Math.max(0, detailedAnswer.length - 1800));
+				const tail = detailedAnswer.slice(Math.max(0, detailedAnswer.length - 1800));
+
+				// Include query results so the continuation can reference actual data
+				const queryContext = queryResults.length > 0
+					? `\n\nDatabase query results available:\n${queryResults.slice(0, 8).map((qr, i) => `${i + 1}. ${qr.query.substring(0, 120)} → ${qr.data.length} rows`).join('\n')}`
+					: '';
+
 				const continuationPrompt = `Continue the answer below. The answer was cut off mid-sentence.
 
 Rules:
@@ -1138,9 +1488,11 @@ Rules:
 - Do NOT repeat earlier content.
 - Start by completing the last unfinished sentence fragment.
 - Output ONLY the continuation text (no intro).
+- Use the data context below to provide a conclusive answer.
 
 User question:
 ${userMessage}
+${queryContext}
 
 Answer so far (truncated):
 ${tail}`;
@@ -1150,7 +1502,7 @@ ${tail}`;
 					{
 						adapter  : createAnthropicChat('claude-sonnet-4-5', apiKey),
 						messages : [{role: 'user', content: continuationPrompt}],
-						maxTokens: 5000,
+						maxTokens: 8000,
 						stream   : false,
 					},
 					{onDebugLog, label: 'Technical continuation'},
@@ -1243,7 +1595,7 @@ CRITICAL: Every number in your answer MUST come from an actual database query re
 			onDebugLog?.('info', 'Claude API', `Tool-only answer phase: ${queryResults.length} query results available`);
 
 			// Use streaming with tools so it can still query if needed
-			let toolOnlyText = '';
+			let toolOnlyText     = '';
 			const toolOnlyStream = chat({
 				adapter          : createAnthropicChat('claude-sonnet-4-5', apiKey),
 				messages,
@@ -1278,6 +1630,18 @@ CRITICAL: Every number in your answer MUST come from an actual database query re
 			};
 		}
 
+		// If the technical answer is already a complete step-by-step guide (multiple sections, structured),
+		// skip simplification to avoid duplication. The simplification model sometimes outputs the guide twice.
+		const headerCount            = (detailedAnswer.match(/^#{1,4}\s/gm) || []).length;
+		const isAlreadyCompleteGuide = detailedAnswer.length >= 1200 && headerCount >= 2 && detailedLinesCount >= 15;
+		if (!hasStreamingConsumer && isAlreadyCompleteGuide) {
+			onProgress?.('Finalizing answer...');
+			return {
+				shortAnswer   : detailedAnswer,
+				detailedAnswer: detailedAnswer,
+			};
+		}
+
 		const lengthRule = desiredDetailLevel === 'detailed'
 			? `OUTPUT LENGTH:
 - Write as much as needed (up to ~25 lines) to fully explain the answer.
@@ -1286,9 +1650,10 @@ CRITICAL: Every number in your answer MUST come from an actual database query re
 				? `OUTPUT LENGTH:
 - Aim for ~5-12 lines. Use bullets to keep it scannable.`
 				: `OUTPUT LENGTH:
-- Be concise but COMPLETE. Aim for ~3-8 lines.
+- Be concise but COMPLETE. Aim for ~3-12 lines.
 - If the topic requires explanation (e.g., comparing two features, explaining a bug), use as many lines as needed to be clear. Never sacrifice clarity for brevity.
-- Simple factual answers (counts, statuses, yes/no) can be 1-3 lines.`;
+- Simple factual answers (counts, statuses, yes/no) can be 1-3 lines.
+- NEVER cram multiple pieces of information into a single long paragraph. Split into multiple short paragraphs or bullets instead.`;
 
 		const simplificationPrompt = `You will rewrite a technical assistant answer for customer support staff who work with the SPY system daily.
 
@@ -1307,15 +1672,18 @@ CRITICAL RULES:
 - Keep the meaning and correctness. Do NOT invent details.
 - If the technical answer found no results, say so honestly. Do NOT fabricate.
 - NEVER include or propose write SQL. NEVER ask to "run" anything.
+- **NO DUPLICATION**: Output ONE coherent answer. NEVER output a summary/header followed by the full content again. If the technical answer is already a complete step-by-step guide, either keep it as-is (with minor formatting) or condense it - but do NOT repeat the full guide twice.
 
 ${lengthRule}
 
-FORMATTING (use markdown wisely - not everything needs bullets):
+FORMATTING (use markdown actively to make the answer scannable and readable):
 - **Bold** for key terms, labels, and important values
-- Bullets for lists of 3+ items
+- Bullets or numbered lists for lists of 2+ items
 - \`backticks\` for file names, function names, table names, column names
-- Short paragraphs (2-3 sentences) for explanations
-- Only use headers (##) when the answer has distinct sections
+- Break the answer into SHORT paragraphs (1-3 sentences each). NEVER write one giant block of text.
+- Use blank lines between paragraphs generously - whitespace improves readability.
+- Use headers (## or ###) when the answer covers multiple topics or sections.
+- For data with multiple fields (e.g., order details, customer info), use a structured format (bullets or a small table) instead of embedding everything in a sentence.
 
 GOOD EXAMPLES:
 
@@ -1340,10 +1708,15 @@ BAD EXAMPLES (avoid these):
 
 CONTENT RULES:
 - SPY UI is in English. Always use exact English UI labels (menus, buttons, tabs, fields).
+- NEVER translate SPY terms: use "consignment" not "konsignation", "POS" not "punkt-salgs", "assortment" not "assortiment" when referring to SPY entities.
+- For checkboxes/toggles: use "Slået til" / "Slået fra" (Danish) or "Enabled" / "Disabled" (English).
+  NEVER show raw 1 or 0 to users for boolean/checkbox values.
 - If they ask for file/code locations, include them directly - don't hide technical info.
 - If a CSV file was created, mention the file name and location.
 - NEVER describe your process or mention tools/databases/vector stores.
 - Start directly with the answer. No prefaces.
+- REMOVE database structure (table names, column names) from support answers — support staff do not need it.
+- REMOVE display-only fields (read-only, backend reference) from setup steps — only include fields the user can actually configure. Keep API key/credentials when they are editable inputs.
 
 INPUTS:
 LATEST USER QUESTION:
@@ -1408,11 +1781,13 @@ ${detailedAnswer}`;
 		onProgress?.('Finalizing answer...');
 
 		// Check if simplified answer looks truncated and request continuation if needed.
-		if (looksTruncatedAnswer(simplifiedText) || simplifiedText.length < 200) {
+		// NOTE: Do NOT use a length threshold (e.g. < 200) here — short but complete answers
+		// (like simple counts) are perfectly valid and must not trigger a continuation request.
+		if (looksTruncatedAnswer(simplifiedText)) {
 			onDebugLog?.('info', 'Claude API', 'Simplified answer looks truncated; requesting continuation');
 			try {
 				const tail                                                                         = simplifiedText.slice(Math.max(0, simplifiedText.length - 800));
-				const continuationPrompt                                                           = `The previous response was cut off mid-sentence. Here is the ending:\n\n"${tail}"\n\nPlease continue EXACTLY where it stopped and finish the answer. Do NOT repeat content. Only output the missing continuation.`;
+				const continuationPrompt                                                           = `The previous response was cut off mid-sentence. Here is the ending:\n\n"${tail}"\n\nPlease continue EXACTLY where it stopped and finish the answer. Do NOT repeat content. Only output the missing continuation. If the answer is already complete, respond with exactly: COMPLETE`;
 				const continuationMessages: Array<{ role: 'user' | 'assistant'; content: string }> = [
 					...simplificationMessages,
 					{role: 'assistant' as const, content: simplifiedText},
@@ -1421,16 +1796,19 @@ ${detailedAnswer}`;
 				const continuationResponse                                                         = await runChatWithMaxTokensFallback(
 					chat,
 					{
-					adapter  : createAnthropicChat('claude-sonnet-4-5', apiKey),
-					messages : continuationMessages,
-					maxTokens: 32_000,
-					stream   : false,
+						adapter  : createAnthropicChat('claude-sonnet-4-5', apiKey),
+						messages : continuationMessages,
+						maxTokens: 32_000,
+						stream   : false,
 					},
 					{onDebugLog, label: 'Simplification continuation'},
 				);
 				const continuationText                                                             = await extractTextFromChatResponse(continuationResponse, onDebugLog, 'Simplification Continuation');
-				if (continuationText) {
+				// Only append if the continuation is actual content, not a "the answer is complete" meta-response.
+				if (continuationText && !looksLikeNonContinuation(continuationText)) {
 					simplifiedText = simplifiedText + continuationText;
+				} else {
+					onDebugLog?.('info', 'Claude API', 'Continuation was empty or indicated answer is already complete - skipping');
 				}
 			} catch (error) {
 				onDebugLog?.('error', 'Claude API', 'Simplification continuation failed', String(error));
@@ -1482,12 +1860,12 @@ ${detailedAnswer}`;
 			// Use Haiku for fast title generation - fallback to Sonnet if empty/error
 			let raw = '';
 			try {
-				const 				titleResponse = await chat({
+				const titleResponse = await chat({
 					adapter  : createAnthropicChat('claude-haiku-4-5', apiKey),
 					messages : [{role: 'user', content: titlePrompt}],
 					maxTokens: 100,
 				});
-				raw = await extractTextFromChatResponse(titleResponse, onDebugLog, 'Chat Title (Haiku)');
+				raw                 = await extractTextFromChatResponse(titleResponse, onDebugLog, 'Chat Title (Haiku)');
 			} catch (titleError) {
 				onDebugLog?.('error', 'Chat Title', `Haiku model error: ${titleError instanceof Error ? titleError.message : String(titleError)}`);
 			}
@@ -1501,7 +1879,7 @@ ${detailedAnswer}`;
 						messages : [{role: 'user', content: titlePrompt}],
 						maxTokens: 100,
 					});
-					raw = await extractTextFromChatResponse(sonnetResponse, onDebugLog, 'Chat Title (Sonnet fallback)');
+					raw                  = await extractTextFromChatResponse(sonnetResponse, onDebugLog, 'Chat Title (Sonnet fallback)');
 				} catch (sonnetError) {
 					onDebugLog?.('error', 'Chat Title', `Sonnet fallback also failed: ${sonnetError instanceof Error ? sonnetError.message : String(sonnetError)}`);
 				}
@@ -1528,19 +1906,61 @@ ${detailedAnswer}`;
 		}
 
 		// Update working summary in the background (best-effort).
+		// Feed the DETAILED answer (contains SQL, tables, schemas) so the summary
+		// captures technical context for future turns.
 		try {
 			onDebugLog?.('info', 'Working Summary', 'Generating updated summary...');
-			const updatePrompt = `You are maintaining a short "working summary" for an ongoing support chat.\n\nUpdate the existing summary using the latest user message and the assistant answer.\n\nRequirements:\n- Output plain text only (no JSON)\n- Max 12 bullet points total\n- Keep it factual and useful for future questions\n- Split into sections with short headers:\n  - Confirmed\n  - Assumptions\n  - Open questions\n- If a point is no longer true, remove it\n- If there is no existing summary, start a new one\n\nExisting summary:\n${workingSummaryText || '(none)'}\n\nLatest user message:\n${userMessage}\n\nAssistant answer:\n${simplifiedText}`;
+			const detailedExcerpt = detailedAnswer && detailedAnswer.length > 3000
+				? detailedAnswer.substring(0, 3000) + '\n[...truncated...]'
+				: (detailedAnswer || simplifiedText);
+
+			const updatePrompt = `You are maintaining a concise "working summary" for an ongoing database support chat.
+Your goal is to preserve enough context so the AI assistant can continue the conversation without losing track of tables, schemas, or previous findings.
+
+Update the existing summary using the latest exchange below.
+
+REQUIRED SECTIONS (use these exact headers):
+
+## Confirmed Facts
+- Key findings, numbers, and answers established so far (max 8 bullets)
+
+## Database Context
+- Tables used (with key columns discovered), e.g.: "customers (id, name, type, disabled)"
+- Successful SQL patterns and JOINs that worked
+- Database name and any schema specifics noted
+- Important column meanings discovered (e.g. "disabled=0 means active")
+
+## Current Topic
+- What the user is currently investigating (1-2 bullets)
+
+## Open Questions
+- Unresolved questions or things to follow up on (max 3 bullets)
+
+RULES:
+- Output plain text only (no JSON, no code fences)
+- Max 20 bullet points total across all sections
+- Remove outdated points
+- Keep table/column names EXACT (they are case-sensitive)
+- If the assistant ran SQL queries, extract the table names and key columns used
+
+Existing summary:
+${workingSummaryText || '(none)'}
+
+Latest user message:
+${userMessage}
+
+Assistant technical answer:
+${detailedExcerpt}`;
 
 			// Use Haiku for fast summary generation - fallback to Sonnet if empty/error
 			let summaryText = '';
 			try {
-				const 				summaryResponse = await chat({
+				const summaryResponse = await chat({
 					adapter  : createAnthropicChat('claude-haiku-4-5', apiKey),
 					messages : [{role: 'user', content: updatePrompt}],
-					maxTokens: 1000,
+					maxTokens: 1500,
 				});
-				summaryText = await extractTextFromChatResponse(summaryResponse, onDebugLog, 'Working Summary (Haiku)');
+				summaryText           = await extractTextFromChatResponse(summaryResponse, onDebugLog, 'Working Summary (Haiku)');
 			} catch (summaryError) {
 				onDebugLog?.('error', 'Working Summary', `Haiku model error: ${summaryError instanceof Error ? summaryError.message : String(summaryError)}`);
 			}
@@ -1552,9 +1972,9 @@ ${detailedAnswer}`;
 					const sonnetResponse = await chat({
 						adapter  : createAnthropicChat('claude-sonnet-4-5', apiKey),
 						messages : [{role: 'user', content: updatePrompt}],
-						maxTokens: 1000,
+						maxTokens: 1500,
 					});
-					summaryText = await extractTextFromChatResponse(sonnetResponse, onDebugLog, 'Working Summary (Sonnet fallback)');
+					summaryText          = await extractTextFromChatResponse(sonnetResponse, onDebugLog, 'Working Summary (Sonnet fallback)');
 				} catch (sonnetError) {
 					onDebugLog?.('error', 'Working Summary', `Sonnet fallback also failed: ${sonnetError instanceof Error ? sonnetError.message : String(sonnetError)}`);
 				}
@@ -1986,6 +2406,84 @@ function extractTextFromClaudeContent(content: any): string {
 	return '';
 }
 
+/**
+ * Detect when a "continuation" response is actually a meta-comment saying
+ * the answer was already complete, rather than genuine continuation content.
+ */
+function looksLikeNonContinuation(text: string): boolean {
+	const t = String(text || '').trim().toLowerCase();
+	if (!t) {
+		return true;
+	}
+
+	// Exact "COMPLETE" sentinel we ask for in the continuation prompt
+	if (t === 'complete') {
+		return true;
+	}
+
+	// Common patterns where the model says the answer is already done
+	const nonContinuationPatterns = [
+		/\bthe answer is already complete\b/i,
+		/\bno missing continuation\b/i,
+		/\bno continuation (?:is )?needed\b/i,
+		/\bnothing (?:more )?to (?:add|continue)\b/i,
+		/\bthe (?:response|answer|sentence) (?:ends|is complete|is finished)\b/i,
+		/\balready (?:complete|finished|ends)\b/i,
+		/\bsvaret er (?:allerede )?(?:komplet|færdig|fuldendt)\b/i,
+		/\bder er (?:ikke )?(?:mere|noget) at tilføje\b/i,
+		/\bingen fortsættelse\b/i,
+	];
+
+	for (const re of nonContinuationPatterns) {
+		if (re.test(t)) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+/**
+ * Detect if the answer looks like it stopped mid-investigation:
+ * Claude was still narrating its tool-use process and never reached a conclusion.
+ */
+function looksLikeMidInvestigation(text: string): boolean {
+	const t = String(text || '').trim();
+	if (!t || t.length < 100) {
+		return false;
+	}
+
+	// Check if the answer ends with typical "process narration" patterns
+	// (Claude describing what it's about to do next, or what it just found)
+	const midInvestigationEndings = [
+		/(?:nu\s+(?:skal|kan|vil|tjekker|checker|sammenligner|kigger)\s+jeg)\b/i,
+		/(?:lad\s+mig\s+(?:prøve|tjekke|checke|undersøge|kigge|finde|query|hente|sammenligne))/i,
+		/(?:nu\s+(?:checker|tjekker|henter|sammenligner|querier)\s+(?:jeg|vi))/i,
+		/(?:jeg\s+(?:vil|skal|kan)\s+nu\s+(?:tjekke|checke|undersøge|sammenligne|query))/i,
+		/(?:let\s+me\s+(?:check|try|query|look|search|compare|find|get))/i,
+		/(?:now\s+(?:I\s+(?:can|will|need\s+to)|let's|checking|querying|comparing))/i,
+		/(?:interessant!?\s)/i,
+		/(?:nu\s+har\s+jeg\s+(?:alle?|de|det))/i,
+	];
+
+	// Check the last 300 chars for mid-investigation patterns
+	const tail = t.slice(-300);
+	for (const re of midInvestigationEndings) {
+		if (re.test(tail)) {
+			return true;
+		}
+	}
+
+	// If there's no conclusion-like ending (answer, summary, result) and it's long,
+	// it's likely an incomplete investigation.
+	const hasConclusion = /sammenfattende|opsummering|konklusion|resultat(?:et)?|svaret?\s+er|total(?:t|en)?|i\s+alt|conclusion|summary|result|in\s+total|the\s+answer/i.test(tail);
+	if (!hasConclusion && t.length > 1500 && looksTruncatedAnswer(t)) {
+		return true;
+	}
+
+	return false;
+}
+
 function looksTruncatedAnswer(text: string): boolean {
 	const t = String(text || '').trim();
 	if (!t) {
@@ -2066,8 +2564,8 @@ async function extractTextFromChatResponse(response: unknown, onDebugLog?: Debug
 	// If it's an async iterable (stream), iterate and collect text
 	if (typeof (response as any)[Symbol.asyncIterator] === 'function') {
 		onDebugLog?.('info', logLabel, 'Response is async iterable, iterating...');
-		let text = '';
-		let eventCount = 0;
+		let text                   = '';
+		let eventCount             = 0;
 		const eventTypes: string[] = [];
 		for await (const event of response as AsyncIterable<any>) {
 			eventCount++;
@@ -2103,7 +2601,7 @@ async function extractTextFromChatResponse(response: unknown, onDebugLog?: Debug
 
 		// Log detailed object info for debugging
 		const constructorName = obj.constructor?.name || 'unknown';
-		const keys = Object.keys(obj).slice(0, 15);
+		const keys            = Object.keys(obj).slice(0, 15);
 		onDebugLog?.('info', logLabel, `Response is object: ${constructorName}, keys: ${keys.join(', ')}`);
 
 		// Check for messages array (TanStack AI chat response format)
