@@ -1,5 +1,13 @@
 import {Fragment, useState, useEffect, JSX} from 'react';
-import type {DatabaseConfig, GitHubConfig, LocalRepoStatus, LocalRepoSyncProgress, SchemaIndexProgress, SchemaIndexStatus} from '../types';
+import type {
+	AiQualityProfile,
+	DatabaseConfig,
+	GitHubConfig,
+	LocalRepoStatus,
+	LocalRepoSyncProgress,
+	SchemaIndexProgress,
+	SchemaIndexStatus,
+} from '../types';
 import './SettingsView.css';
 
 export function SettingsView(): JSX.Element {
@@ -7,6 +15,7 @@ export function SettingsView(): JSX.Element {
 	const [isEditing, setIsEditing]                             = useState<boolean>(false);
 	const [testResult, setTestResult]                           = useState<{ success: boolean; error?: string } | null>(null);
 	const [schemaIndexDatabaseName, setSchemaIndexDatabaseName] = useState<string>('');
+	const [schemaIndexBranch, setSchemaIndexBranch]             = useState<string>('');
 	const [schemaIndexStatus, setSchemaIndexStatus]             = useState<SchemaIndexStatus | null>(null);
 	const [schemaIndexProgress, setSchemaIndexProgress]         = useState<SchemaIndexProgress | null>(null);
 	const [schemaIndexError, setSchemaIndexError]               = useState<string>('');
@@ -14,6 +23,11 @@ export function SettingsView(): JSX.Element {
 	const [apiKey, setApiKey]                                   = useState('');
 	const [apiKeyStatus, setApiKeyStatus]                       = useState<'loading' | 'saved' | 'error' | 'none'>('loading');
 	const [apiKeyError, setApiKeyError]                         = useState<string>('');
+	const [openAiApiKey, setOpenAiApiKey]                       = useState('');
+	const [openAiApiKeyStatus, setOpenAiApiKeyStatus]           = useState<'loading' | 'saved' | 'error' | 'none'>('loading');
+	const [openAiApiKeyError, setOpenAiApiKeyError]             = useState<string>('');
+	const [selectedModel, setSelectedModel]                     = useState<'claude' | 'openai'>('claude');
+	const [aiQualityProfile, setAiQualityProfile]               = useState<AiQualityProfile>('maximum_accuracy');
 	const [userName, setUserName]                               = useState('');
 	const [userNameStatus, setUserNameStatus]                   = useState<'loading' | 'saved' | 'error' | 'none'>('loading');
 	const [githubConfig, setGithubConfig]                       = useState<GitHubConfig>({
@@ -41,6 +55,9 @@ export function SettingsView(): JSX.Element {
 	useEffect(() => {
 		loadConnection();
 		loadApiKey();
+		loadOpenAiApiKey();
+		loadSelectedModel();
+		loadAiQualityProfile();
 		loadUserName();
 		loadGitHubConfig();
 		loadLocalRepoStatus();
@@ -123,7 +140,7 @@ export function SettingsView(): JSX.Element {
 			return;
 		}
 		try {
-			const status = await window.electronAPI.getSchemaIndexStatus(connection.id);
+			const status = await window.electronAPI.getSchemaIndexStatus(connection.id, schemaIndexBranch.trim() || undefined);
 			setSchemaIndexStatus(status);
 		} catch (error) {
 			setSchemaIndexError(error instanceof Error ? error.message : String(error));
@@ -146,7 +163,7 @@ export function SettingsView(): JSX.Element {
 
 		setIsGeneratingSchemaIndex(true);
 		try {
-			const status = await window.electronAPI.generateSchemaIndex(connection.id, dbName);
+			const status = await window.electronAPI.generateSchemaIndex(connection.id, dbName, schemaIndexBranch.trim() || undefined);
 			setSchemaIndexStatus(status);
 		} catch (error) {
 			setSchemaIndexError(error instanceof Error ? error.message : String(error));
@@ -169,6 +186,62 @@ export function SettingsView(): JSX.Element {
 			setApiKeyStatus('error');
 			setApiKeyError(error instanceof Error ? error.message : 'Unknown error');
 		}
+	}
+
+	async function loadOpenAiApiKey(): Promise<void> {
+		try {
+			const key = await window.electronAPI.getOpenAiApiKey();
+			if (key) {
+				setOpenAiApiKey(key);
+				setOpenAiApiKeyStatus('saved');
+			} else {
+				setOpenAiApiKeyStatus('none');
+			}
+		} catch (error) {
+			console.error('Error loading OpenAI API key:', error);
+			setOpenAiApiKeyStatus('error');
+			setOpenAiApiKeyError(error instanceof Error ? error.message : 'Unknown error');
+		}
+	}
+
+	async function loadSelectedModel(): Promise<void> {
+		try {
+			const model = await window.electronAPI.getSelectedModel();
+			setSelectedModel(model || 'claude');
+		} catch (error) {
+			console.error('Error loading selected model:', error);
+		}
+	}
+
+	async function loadAiQualityProfile(): Promise<void> {
+		try {
+			const profile = await window.electronAPI.getAiQualityProfile();
+			setAiQualityProfile(profile || 'maximum_accuracy');
+		} catch (error) {
+			console.error('Error loading AI quality profile:', error);
+		}
+	}
+
+	async function saveOpenAiApiKeyFunction(): Promise<void> {
+		try {
+			setOpenAiApiKeyError('');
+			await window.electronAPI.saveOpenAiApiKey(openAiApiKey);
+			setOpenAiApiKeyStatus('saved');
+		} catch (error) {
+			console.error('Error saving OpenAI API key:', error);
+			setOpenAiApiKeyStatus('error');
+			setOpenAiApiKeyError(error instanceof Error ? error.message : 'Failed to save OpenAI API key');
+		}
+	}
+
+	async function saveSelectedModelFunction(model: 'claude' | 'openai'): Promise<void> {
+		setSelectedModel(model);
+		await window.electronAPI.saveSelectedModel(model);
+	}
+
+	async function saveAiQualityProfileFunction(profile: AiQualityProfile): Promise<void> {
+		setAiQualityProfile(profile);
+		await window.electronAPI.saveAiQualityProfile(profile);
 	}
 
 	async function loadUserName(): Promise<void> {
@@ -237,6 +310,7 @@ export function SettingsView(): JSX.Element {
 			const config = await window.electronAPI.getGitHubConfig();
 			if (config) {
 				setGithubConfig(config);
+				setSchemaIndexBranch((prev) => prev.trim() !== '' ? prev : (config.branch || ''));
 				setGithubStatus('saved');
 			} else {
 				setGithubStatus('none');
@@ -416,35 +490,176 @@ export function SettingsView(): JSX.Element {
 			</section>
 
 			<section className="settings-section">
-				<h2>Claude API Configuration</h2>
+				<h2>AI Model</h2>
 				<div className="form-group">
-					<label htmlFor="api-key">API Key</label>
-					<input
-						id="api-key"
-						type="password"
-						value={apiKey}
-						onChange={(event) => setApiKey(event.target.value)}
-						placeholder="sk-ant-..."
-					/>
-					<button onClick={saveApiKeyFunction}>
-						Save API Key
-					</button>
-					{apiKeyStatus === 'saved' && (
-						<span className="status success">✓ Saved</span>
-					)}
-					{apiKeyStatus === 'none' && (
-						<span className="status error">⚠ Not configured</span>
-					)}
-					{apiKeyStatus === 'error' && (
-						<span className="status error">⚠ Error: {apiKeyError}</span>
-					)}
+					<div style={{display: 'flex', gap: '12px', marginBottom: '20px'}}>
+						<label style={{
+							display     : 'flex',
+							alignItems  : 'center',
+							gap         : '8px',
+							cursor      : 'pointer',
+							padding     : '10px 16px',
+							border      : `2px solid ${selectedModel === 'claude' ? 'var(--accent-color)' : 'var(--border-color)'}`,
+							borderRadius: '8px',
+							flex        : 1,
+						}}>
+							<input
+								type="radio"
+								name="ai-model"
+								value="claude"
+								checked={selectedModel === 'claude'}
+								onChange={() => saveSelectedModelFunction('claude')}
+							/>
+							<span>
+								<strong>Claude Sonnet</strong>
+								<br/>
+								<small style={{color: 'var(--text-secondary)'}}>Anthropic</small>
+							</span>
+						</label>
+						<label style={{
+							display     : 'flex',
+							alignItems  : 'center',
+							gap         : '8px',
+							cursor      : 'pointer',
+							padding     : '10px 16px',
+							border      : `2px solid ${selectedModel === 'openai' ? 'var(--accent-color)' : 'var(--border-color)'}`,
+							borderRadius: '8px',
+							flex        : 1,
+						}}>
+							<input
+								type="radio"
+								name="ai-model"
+								value="openai"
+								checked={selectedModel === 'openai'}
+								onChange={() => saveSelectedModelFunction('openai')}
+							/>
+							<span>
+								<strong>ChatGPT</strong>
+								<br/>
+								<small style={{color: 'var(--text-secondary)'}}>OpenAI</small>
+							</span>
+						</label>
+					</div>
 				</div>
-				<p className="help-text">
-					Get your API key from{' '}
-					<a href="https://console.anthropic.com/" target="_blank" rel="noopener noreferrer">
-						console.anthropic.com
-					</a>
-				</p>
+
+				{selectedModel === 'claude' && (
+					<div className="form-group">
+						<label htmlFor="api-key">Anthropic API Key</label>
+						<input
+							id="api-key"
+							type="password"
+							value={apiKey}
+							onChange={(event) => setApiKey(event.target.value)}
+							placeholder="sk-ant-..."
+						/>
+						<button onClick={saveApiKeyFunction}>
+							Save API Key
+						</button>
+						{apiKeyStatus === 'saved' && (
+							<span className="status success">✓ Saved</span>
+						)}
+						{apiKeyStatus === 'none' && (
+							<span className="status error">⚠ Not configured</span>
+						)}
+						{apiKeyStatus === 'error' && (
+							<span className="status error">⚠ Error: {apiKeyError}</span>
+						)}
+						<p className="help-text" style={{marginTop: '8px'}}>
+							Get your API key from{' '}
+							<a href="https://console.anthropic.com/" target="_blank" rel="noopener noreferrer">
+								console.anthropic.com
+							</a>
+						</p>
+					</div>
+				)}
+
+				{selectedModel === 'openai' && (
+					<Fragment>
+						<div className="form-group">
+							<label>OpenAI Quality Profile</label>
+							<div style={{display: 'flex', gap: '12px', marginBottom: '12px'}}>
+								<label style={{
+									display     : 'flex',
+									alignItems  : 'center',
+									gap         : '8px',
+									cursor      : 'pointer',
+									padding     : '10px 16px',
+									border      : `2px solid ${aiQualityProfile === 'balanced' ? 'var(--accent-color)' : 'var(--border-color)'}`,
+									borderRadius: '8px',
+									flex        : 1,
+								}}>
+									<input
+										type="radio"
+										name="openai-quality-profile"
+										value="balanced"
+										checked={aiQualityProfile === 'balanced'}
+										onChange={() => saveAiQualityProfileFunction('balanced')}
+									/>
+									<span>
+										<strong>Balanced</strong>
+										<br/>
+										<small style={{color: 'var(--text-secondary)'}}>Faster replies with lighter investigation</small>
+									</span>
+								</label>
+								<label style={{
+									display     : 'flex',
+									alignItems  : 'center',
+									gap         : '8px',
+									cursor      : 'pointer',
+									padding     : '10px 16px',
+									border      : `2px solid ${aiQualityProfile === 'maximum_accuracy' ? 'var(--accent-color)' : 'var(--border-color)'}`,
+									borderRadius: '8px',
+									flex        : 1,
+								}}>
+									<input
+										type="radio"
+										name="openai-quality-profile"
+										value="maximum_accuracy"
+										checked={aiQualityProfile === 'maximum_accuracy'}
+										onChange={() => saveAiQualityProfileFunction('maximum_accuracy')}
+									/>
+									<span>
+										<strong>Maximum Accuracy</strong>
+										<br/>
+										<small style={{color: 'var(--text-secondary)'}}>More grounding, stronger conclusion checks, lighter rewriting</small>
+									</span>
+								</label>
+							</div>
+							<p className="help-text">
+								Maximum Accuracy is recommended when correctness matters more than speed.
+							</p>
+						</div>
+
+						<div className="form-group">
+							<label htmlFor="openai-api-key">OpenAI API Key</label>
+							<input
+								id="openai-api-key"
+								type="password"
+								value={openAiApiKey}
+								onChange={(event) => setOpenAiApiKey(event.target.value)}
+								placeholder="sk-proj-..."
+							/>
+							<button onClick={saveOpenAiApiKeyFunction}>
+								Save API Key
+							</button>
+							{openAiApiKeyStatus === 'saved' && (
+								<span className="status success">✓ Saved</span>
+							)}
+							{openAiApiKeyStatus === 'none' && (
+								<span className="status error">⚠ Not configured</span>
+							)}
+							{openAiApiKeyStatus === 'error' && (
+								<span className="status error">⚠ Error: {openAiApiKeyError}</span>
+							)}
+							<p className="help-text" style={{marginTop: '8px'}}>
+								Get your API key from{' '}
+								<a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer">
+									platform.openai.com/api-keys
+								</a>
+							</p>
+						</div>
+					</Fragment>
+				)}
 			</section>
 
 			<section className="settings-section">
@@ -798,9 +1013,28 @@ export function SettingsView(): JSX.Element {
 								placeholder="e.g. spy_live (sample DB)"
 							/>
 							<p className="help-text">
-								This is only used to generate the schema snapshot. The resulting schema index is shared across all databases on this
-								connection.
+								This is only used to generate the schema snapshot.
 								Allowed characters: letters, numbers, underscore.
+							</p>
+						</div>
+
+						<div className="form-group">
+							<label htmlFor="schema-index-branch">Branch for this schema index</label>
+							<input
+								id="schema-index-branch"
+								type="text"
+								value={schemaIndexBranch}
+								onChange={(event) => {
+									setSchemaIndexBranch(event.target.value);
+									setSchemaIndexStatus(null);
+									setSchemaIndexError('');
+								}}
+								onBlur={refreshSchemaIndexStatus}
+								placeholder="e.g. 2026_02 (leave blank for global fallback)"
+							/>
+							<p className="help-text">
+								Create separate schema snapshots per branch when database schema differs between releases.
+								At runtime Jørgen will try chat branch first, then default branch, then a global fallback index.
 							</p>
 						</div>
 
@@ -843,6 +1077,12 @@ export function SettingsView(): JSX.Element {
 							<div className="schema-index-status">
 								<div><strong>Status:</strong> {schemaIndexStatus.exists ? 'Available' : 'Not generated yet'}</div>
 								<div><strong>Path:</strong> {schemaIndexStatus.filePath}</div>
+								<div><strong>Requested branch:</strong> {schemaIndexStatus.requestedBranch || 'global'}</div>
+								{schemaIndexStatus.exists && (
+									<div><strong>Resolved
+										branch:</strong> {schemaIndexStatus.branch || 'global'}{schemaIndexStatus.fallbackUsed ? ' (fallback used)' : ''}
+									</div>
+								)}
 								{schemaIndexStatus.generatedAtIso && (
 									<div><strong>Generated:</strong> {new Date(schemaIndexStatus.generatedAtIso).toLocaleString()}</div>
 								)}

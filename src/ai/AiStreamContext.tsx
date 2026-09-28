@@ -1,5 +1,5 @@
 import React, {createContext, JSX, useContext, useEffect, useMemo, useRef, useState} from 'react';
-import type {AttachmentMeta, Message} from '../types';
+import type {AttachmentMeta} from '../types';
 
 export type AiStreamStatus = 'idle' | 'running' | 'stopping' | 'error';
 
@@ -40,7 +40,7 @@ interface AiStreamContextValue {
 	getClarificationRequest: (chatId: string) => ClarificationRequest | null;
 	startChatStream: (input: SendAiMessageInput) => Promise<{ streamId: string }>;
 	stopChatStream: (chatId: string) => Promise<void>;
-	submitClarification: (chatId: string, response: string) => Promise<void>;
+	submitClarification: (chatId: string, response: string, attachments?: AttachmentMeta[]) => Promise<void>;
 }
 
 const AiStreamContext = createContext<AiStreamContextValue | null>(null);
@@ -69,7 +69,7 @@ export function AiStreamProvider({children}: { children: React.ReactNode }): JSX
 					if (!current) {
 						return prev;
 					}
-					// If the event includes a role and it's not assistant, ignore.
+					// If the event includes a role, and it's not assistant, ignore.
 					if (aiEvent.role && String(aiEvent.role).toLowerCase() !== 'assistant') {
 						return prev;
 					}
@@ -89,7 +89,7 @@ export function AiStreamProvider({children}: { children: React.ReactNode }): JSX
 					if (!current) {
 						return prev;
 					}
-					// If the event includes a role and it's not assistant, ignore.
+					// If the event includes a role, and it's not assistant, ignore.
 					if (aiEvent.role && String(aiEvent.role).toLowerCase() !== 'assistant') {
 						return prev;
 					}
@@ -114,8 +114,8 @@ export function AiStreamProvider({children}: { children: React.ReactNode }): JSX
 					next.set(chatId, {
 						...current,
 						partialText,
-						// Don't show partial streaming - show loading until complete. User sees full answer when done.
-						hasStreamedContent: false,
+						// Show partial content while streaming for faster perceived responsiveness.
+						hasStreamedContent: partialText.length > 0,
 						inTextMessage     : true,
 						lastEventAtMs     : Date.now(),
 					});
@@ -130,7 +130,8 @@ export function AiStreamProvider({children}: { children: React.ReactNode }): JSX
 				return;
 			}
 
-			// Persist the final assistant message even if the chat view is not open.
+			// Persist final message before clearing stream state to avoid race conditions
+			// where the UI refreshes before the assistant message is stored.
 			try {
 				const chat             = await window.electronAPI.getChat(chatId);
 				const existingMessages = (chat?.messages || []).map((m) => ({
@@ -151,7 +152,7 @@ export function AiStreamProvider({children}: { children: React.ReactNode }): JSX
 				const updated = [...existingMessages, assistantMessage];
 				await window.electronAPI.updateChat(chatId, updated, payload.result.suggestedTitle ? {title: payload.result.suggestedTitle} : undefined);
 			} catch {
-				// Non-fatal: the UI can still show streamed content; persistence can be retried by refresh.
+				// Non-fatal: persistence can be recovered by refresh.
 			}
 
 			setStreamsByChatId((prev) => {
@@ -287,29 +288,6 @@ export function AiStreamProvider({children}: { children: React.ReactNode }): JSX
 			startChatStream        : async (input: SendAiMessageInput) => {
 				const now = Date.now();
 
-				// Persist user message immediately so it shows in history even if user navigates away.
-				try {
-					const chat             = await window.electronAPI.getChat(input.chatId);
-					const existingMessages = (chat?.messages || []).map((m) => ({
-						role           : m.role,
-						content        : m.content,
-						detailedContent: (m as any).detailedContent,
-						timestamp      : m.timestamp,
-						attachments    : (m as any).attachments,
-					}));
-
-					const userMessage: any = {
-						role       : 'user',
-						content    : input.message,
-						timestamp  : new Date().toISOString(),
-						attachments: input.attachments && input.attachments.length > 0 ? input.attachments : undefined,
-					};
-
-					await window.electronAPI.updateChat(input.chatId, [...existingMessages, userMessage]);
-				} catch {
-					// Non-fatal: streaming can still proceed.
-				}
-
 				const {streamId} = await window.electronAPI.startAiStream(
 					input.chatId,
 					input.message,
@@ -338,6 +316,31 @@ export function AiStreamProvider({children}: { children: React.ReactNode }): JSX
 					return next;
 				});
 
+				// Persist user message in background to avoid delaying stream start.
+				void (async () => {
+					try {
+						const chat             = await window.electronAPI.getChat(input.chatId);
+						const existingMessages = (chat?.messages || []).map((m) => ({
+							role           : m.role,
+							content        : m.content,
+							detailedContent: (m as any).detailedContent,
+							timestamp      : m.timestamp,
+							attachments    : (m as any).attachments,
+						}));
+
+						const userMessage: any = {
+							role       : 'user',
+							content    : input.message,
+							timestamp  : new Date().toISOString(),
+							attachments: input.attachments && input.attachments.length > 0 ? input.attachments : undefined,
+						};
+
+						await window.electronAPI.updateChat(input.chatId, [...existingMessages, userMessage]);
+					} catch {
+						// Non-fatal: streaming can still proceed.
+					}
+				})();
+
 				return {streamId};
 			},
 			stopChatStream         : async (chatId: string) => {
@@ -356,7 +359,7 @@ export function AiStreamProvider({children}: { children: React.ReactNode }): JSX
 				});
 				await window.electronAPI.stopAiStream(state.streamId);
 			},
-			submitClarification    : async (chatId: string, response: string) => {
+			submitClarification    : async (chatId: string, response: string, attachments?: AttachmentMeta[]) => {
 				const clarification = clarificationByChatId.get(chatId);
 				const input         = clarificationInputByChatIdRef.current.get(chatId);
 				if (!clarification || !input) {
@@ -380,15 +383,26 @@ export function AiStreamProvider({children}: { children: React.ReactNode }): JSX
 				}));
 
 				const userMessage: any = {
-					role     : 'user',
-					content  : response,
-					timestamp: new Date().toISOString(),
+					role       : 'user',
+					content    : response,
+					timestamp  : new Date().toISOString(),
+					attachments: attachments && attachments.length > 0 ? attachments : undefined,
 				};
 
 				await window.electronAPI.updateChat(chatId, [...existingMessages, userMessage]);
 
 				// Build history: [original user message, assistant question] - we already added assistant in offClarification
 				const history = existingMessages.map((m) => ({role: m.role, content: m.content}));
+
+				const mergedAttachments = [
+					...(input.attachments || []),
+					...(attachments || []),
+				].reduce((acc, item) => {
+					if (!acc.some((existing) => existing.id === item.id)) {
+						acc.push(item);
+					}
+					return acc;
+				}, [] as AttachmentMeta[]);
 
 				// Start new stream with clarification as context
 				const {streamId} = await window.electronAPI.startAiStream(
@@ -397,11 +411,16 @@ export function AiStreamProvider({children}: { children: React.ReactNode }): JSX
 					input.databases,
 					history,
 					input.chatContext,
-					input.attachments,
+					mergedAttachments.length > 0 ? mergedAttachments : undefined,
 				);
 
 				streamIdToChatIdRef.current.set(streamId, chatId);
-				streamIdToInputRef.current.set(streamId, {...input, message: response, history});
+				streamIdToInputRef.current.set(streamId, {
+					...input,
+					message    : response,
+					history,
+					attachments: mergedAttachments.length > 0 ? mergedAttachments : undefined,
+				});
 
 				setStreamsByChatId((prev) => {
 					const next = new Map(prev);
@@ -437,11 +456,4 @@ export function useAiStreams(): AiStreamContextValue {
 	return ctx;
 }
 
-export function buildStreamAssistantMessage(stream: ChatStreamState): Message {
-	return {
-		role     : 'assistant',
-		content  : stream.partialText,
-		timestamp: new Date(stream.lastEventAtMs),
-	};
-}
 

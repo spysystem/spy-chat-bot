@@ -105,6 +105,9 @@ export interface SchemaIndexStatus {
 	generatedAtIso?: string;
 	tableCount?: number;
 	source?: 'information_schema' | 'describe_fallback';
+	requestedBranch?: string;
+	branch?: string;
+	fallbackUsed?: boolean;
 }
 
 export interface LocalRepoStatus {
@@ -120,6 +123,26 @@ export interface LocalRepoSyncProgress {
 	message?: string;
 }
 
+export interface DebugLogEntry {
+	id: string;
+	timestamp: string;
+	type: 'query' | 'tool' | 'api' | 'error' | 'info';
+	category: string;
+	message: string;
+	details?: string;
+	chatId?: string;
+	runId?: string;
+	provider?: 'claude' | 'openai';
+	phase?: 'prepare' | 'retrieval' | 'technical' | 'postprocess' | 'tool' | 'stream' | 'ipc' | 'background' | 'other';
+	toolName?: string;
+	durationMs?: number;
+	status?: 'started' | 'completed' | 'failed' | 'info';
+	rowCount?: number;
+	meta?: Record<string, string | number | boolean | null | undefined>;
+}
+
+export type AiQualityProfile = 'balanced' | 'maximum_accuracy';
+
 declare global {
 	interface Window {
 		electronAPI: {
@@ -128,8 +151,8 @@ declare global {
 			getDatabaseConfigs: () => Promise<DatabaseConfig[]>;
 			deleteDatabaseConfig: (id: string) => Promise<void>;
 			getSystems: (statuses?: string[]) => Promise<SystemDirectorySystem[]>;
-			getSchemaIndexStatus: (configId: string) => Promise<SchemaIndexStatus>;
-			generateSchemaIndex: (configId: string, databaseName: string) => Promise<SchemaIndexStatus>;
+			getSchemaIndexStatus: (configId: string, branch?: string) => Promise<SchemaIndexStatus>;
+			generateSchemaIndex: (configId: string, databaseName: string, branch?: string) => Promise<SchemaIndexStatus>;
 			onSchemaIndexProgress: (callback: (progress: SchemaIndexProgress) => void) => () => void;
 			onSchemaIndexComplete: (callback: (status: SchemaIndexStatus) => void) => () => void;
 			onSchemaIndexError: (callback: (error: string) => void) => () => void;
@@ -166,6 +189,12 @@ declare global {
 			}) => void) => () => void;
 			getApiKey: () => Promise<string | null>;
 			saveApiKey: (apiKey: string) => Promise<void>;
+			getOpenAiApiKey: () => Promise<string | null>;
+			saveOpenAiApiKey: (apiKey: string) => Promise<void>;
+			getSelectedModel: () => Promise<'claude' | 'openai'>;
+			saveSelectedModel: (model: 'claude' | 'openai') => Promise<void>;
+			getAiQualityProfile: () => Promise<AiQualityProfile>;
+			saveAiQualityProfile: (profile: AiQualityProfile) => Promise<void>;
 			getChats: () => Promise<Chat[]>;
 			getChat: (chatId: string) => Promise<Chat | null>;
 			createChat: (title?: string) => Promise<Chat>;
@@ -176,6 +205,7 @@ declare global {
 				timestamp: string
 			}>, update?: ChatUpdate) => Promise<void>;
 			deleteChat: (chatId: string) => Promise<void>;
+			clearAllChats: () => Promise<void>;
 			setWorkingSummary: (chatId: string, text: string) => Promise<void>;
 			clearWorkingSummary: (chatId: string) => Promise<void>;
 			onMessageProgress: (callback: (payload: { chatId: string; streamId: string; status: string } | string) => void) => () => void;
@@ -193,13 +223,7 @@ declare global {
 			focusWindow: () => Promise<void>;
 			openExternalUrl: (url: string) => Promise<{ success: boolean; error?: string }>;
 			onDeepLink: (callback: (url: string) => void) => () => void;
-			onDebugLog: (callback: (log: {
-				timestamp: string;
-				type: 'query' | 'tool' | 'api' | 'error' | 'info';
-				category: string;
-				message: string;
-				details?: string;
-			}) => void) => () => void;
+			onDebugLog: (callback: (log: DebugLogEntry) => void) => () => void;
 			checkForUpdates: () => Promise<{ available: boolean; version?: string; currentVersion?: string; error?: string }>;
 			downloadUpdate: () => Promise<{ success: boolean; error?: string }>;
 			installUpdate: () => void;

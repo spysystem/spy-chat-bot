@@ -233,6 +233,10 @@ export class ChatService {
 		await this.saveChats(filtered);
 	}
 
+	async clearAllChats(): Promise<void> {
+		await this.saveChats([]);
+	}
+
 	private async saveChats(chats: Chat[]): Promise<void> {
 		await fs.writeFile(this.chatsPath, JSON.stringify(chats, null, 2), 'utf-8');
 	}

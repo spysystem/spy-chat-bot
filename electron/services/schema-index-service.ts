@@ -40,6 +40,7 @@ export interface SchemaIndexFileV1 {
 	generatedAtIso: string;
 	dbHost?: string;
 	configId: string;
+	branch?: string;
 	/**
 	 * Database name used to GENERATE this schema snapshot.
 	 * The resulting index is intended to be reused across databases with the same schema.
@@ -61,6 +62,14 @@ export interface SchemaIndexStatus {
 	generatedAtIso?: string;
 	tableCount?: number;
 	source?: SchemaIndexSource;
+	requestedBranch?: string;
+	branch?: string;
+	fallbackUsed?: boolean;
+}
+
+export interface SchemaIndexLookupOptions {
+	branch?: string;
+	fallbackBranches?: string[];
 }
 
 function sanitizeForFilename(value: string): string {
@@ -79,21 +88,112 @@ function normalizeNeedle(value: string): string {
 	return value.trim().toLowerCase();
 }
 
+function normalizeBranch(value?: string | null): string | undefined {
+	const trimmed = String(value || '').trim();
+	return trimmed !== '' ? trimmed : undefined;
+}
+
 export class SchemaIndexService {
 	private readonly baseDir: string;
-	private readonly memoryCache: Map<string, { index: SchemaIndexFileV1; loadedAtMs: number }> = new Map();
+	private readonly memoryCache: Map<string, { index: SchemaIndexFileV1; loadedAtMs: number; expiresAtMs: number }> = new Map();
+	private readonly cacheTtlMs: number                                                                              = 30 * 60 * 1000;
+	private lastLoadMeta: {
+		configId: string;
+		cacheHit: boolean;
+		durationMs: number;
+		requestedBranch?: string;
+		resolvedBranch?: string;
+		fallbackUsed?: boolean
+	} | null                                                                                                         = null;
 
 	constructor() {
 		this.baseDir = path.join(app.getPath('userData'), 'schema-index');
 	}
 
-	private buildKey(configId: string): string {
-		return configId;
+	private buildKey(configId: string, branch?: string): string {
+		return `${configId}::${normalizeBranch(branch) || '__global__'}`;
 	}
 
-	private buildFilePath(configId: string): string {
-		const safeConfigId = sanitizeForFilename(configId);
-		return path.join(this.baseDir, safeConfigId, `schema.json.gz`);
+	private buildFilePath(configId: string, branch?: string): string {
+		const safeConfigId     = sanitizeForFilename(configId);
+		const normalizedBranch = normalizeBranch(branch);
+		if (!normalizedBranch) {
+			return path.join(this.baseDir, safeConfigId, 'schema.json.gz');
+		}
+		return path.join(this.baseDir, safeConfigId, 'branches', sanitizeForFilename(normalizedBranch), 'schema.json.gz');
+	}
+
+	private getCandidateBranches(options?: SchemaIndexLookupOptions): Array<string | undefined> {
+		const requested = normalizeBranch(options?.branch);
+		const fallbacks = (options?.fallbackBranches || [])
+			.map((branch) => normalizeBranch(branch))
+			.filter((branch): branch is string => !!branch);
+		return Array.from(new Set<string | undefined>([requested, ...fallbacks, undefined]));
+	}
+
+	private async readIndexFile(filePath: string): Promise<SchemaIndexFileV1 | null> {
+		try {
+			const buf      = await fs.readFile(filePath);
+			const unzipped = await gunzipAsync(buf);
+			const parsed   = JSON.parse(unzipped.toString('utf-8')) as SchemaIndexFileV1;
+			if (parsed.version !== 1) {
+				return null;
+			}
+			return parsed;
+		} catch {
+			return null;
+		}
+	}
+
+	private async resolveIndex(
+		configId: string,
+		options?: SchemaIndexLookupOptions,
+	): Promise<{
+		index: SchemaIndexFileV1;
+		filePath: string;
+		requestedBranch?: string;
+		resolvedBranch?: string;
+		fallbackUsed: boolean;
+		cacheHit: boolean
+	} | null> {
+		const requestedBranch = normalizeBranch(options?.branch);
+		for (const candidateBranch of this.getCandidateBranches(options)) {
+			const key    = this.buildKey(configId, candidateBranch);
+			const cached = this.memoryCache.get(key);
+			if (cached && Date.now() < cached.expiresAtMs) {
+				const resolvedBranch = normalizeBranch(cached.index.branch) || candidateBranch;
+				return {
+					index       : cached.index,
+					filePath    : this.buildFilePath(configId, candidateBranch),
+					requestedBranch,
+					resolvedBranch,
+					fallbackUsed: requestedBranch !== resolvedBranch,
+					cacheHit    : true,
+				};
+			}
+
+			const filePath = this.buildFilePath(configId, candidateBranch);
+			const parsed   = await this.readIndexFile(filePath);
+			if (!parsed) {
+				continue;
+			}
+
+			this.memoryCache.set(key, {
+				index      : parsed,
+				loadedAtMs : Date.now(),
+				expiresAtMs: Date.now() + this.cacheTtlMs,
+			});
+			const resolvedBranch = normalizeBranch(parsed.branch) || candidateBranch;
+			return {
+				index       : parsed,
+				filePath,
+				requestedBranch,
+				resolvedBranch,
+				fallbackUsed: requestedBranch !== resolvedBranch,
+				cacheHit    : false,
+			};
+		}
+		return null;
 	}
 
 	private buildTags(tableName: string, tableComment?: string): string[] {
@@ -118,44 +218,48 @@ export class SchemaIndexService {
 		return Array.from(new Set(tokens)).slice(0, 40);
 	}
 
-	async getStatus(configId: string): Promise<SchemaIndexStatus> {
-		const filePath = this.buildFilePath(configId);
-		try {
-			const buf      = await fs.readFile(filePath);
-			const unzipped = await gunzipAsync(buf);
-			const parsed   = JSON.parse(unzipped.toString('utf-8')) as SchemaIndexFileV1;
+	async getStatus(configId: string, options?: SchemaIndexLookupOptions): Promise<SchemaIndexStatus> {
+		const resolved = await this.resolveIndex(configId, options);
+		if (!resolved) {
 			return {
-				exists        : true,
-				filePath,
-				generatedAtIso: parsed.generatedAtIso,
-				tableCount    : parsed.tables.length,
-				source        : parsed.source,
+				exists         : false,
+				filePath       : this.buildFilePath(configId, options?.branch),
+				requestedBranch: normalizeBranch(options?.branch),
 			};
-		} catch (error) {
-			return {exists: false, filePath};
 		}
+		return {
+			exists         : true,
+			filePath       : resolved.filePath,
+			generatedAtIso : resolved.index.generatedAtIso,
+			tableCount     : resolved.index.tables.length,
+			source         : resolved.index.source,
+			requestedBranch: resolved.requestedBranch,
+			branch         : resolved.resolvedBranch,
+			fallbackUsed   : resolved.fallbackUsed,
+		};
 	}
 
-	async loadIndex(configId: string): Promise<SchemaIndexFileV1 | null> {
-		const key    = this.buildKey(configId);
-		const cached = this.memoryCache.get(key);
-		if (cached) {
-			return cached.index;
-		}
-
-		const filePath = this.buildFilePath(configId);
-		try {
-			const buf      = await fs.readFile(filePath);
-			const unzipped = await gunzipAsync(buf);
-			const parsed   = JSON.parse(unzipped.toString('utf-8')) as SchemaIndexFileV1;
-			if (parsed.version !== 1) {
-				return null;
-			}
-			this.memoryCache.set(key, {index: parsed, loadedAtMs: Date.now()});
-			return parsed;
-		} catch {
+	async loadIndex(configId: string, options?: SchemaIndexLookupOptions): Promise<SchemaIndexFileV1 | null> {
+		const startMs  = Date.now();
+		const resolved = await this.resolveIndex(configId, options);
+		if (!resolved) {
+			this.lastLoadMeta = {
+				configId,
+				cacheHit       : false,
+				durationMs     : Date.now() - startMs,
+				requestedBranch: normalizeBranch(options?.branch),
+			};
 			return null;
 		}
+		this.lastLoadMeta = {
+			configId,
+			cacheHit       : resolved.cacheHit,
+			durationMs     : Date.now() - startMs,
+			requestedBranch: resolved.requestedBranch,
+			resolvedBranch : resolved.resolvedBranch,
+			fallbackUsed   : resolved.fallbackUsed,
+		};
+		return resolved.index;
 	}
 
 	async generateIndex(
@@ -163,10 +267,12 @@ export class SchemaIndexService {
 		sampleDatabaseName: string,
 		databaseService: DatabaseService,
 		onProgress?: (progress: SchemaIndexProgress) => void,
+		options?: SchemaIndexLookupOptions,
 	): Promise<SchemaIndexStatus> {
 		assertSafeIdentifier(sampleDatabaseName, 'Database name');
 
-		const filePath = this.buildFilePath(configId);
+		const branch   = normalizeBranch(options?.branch);
+		const filePath = this.buildFilePath(configId, branch);
 		await fs.mkdir(path.dirname(filePath), {recursive: true});
 
 		// Use multiple steps so the Settings progress bar visibly moves.
@@ -177,7 +283,7 @@ export class SchemaIndexService {
 		let index: SchemaIndexFileV1 | null = null;
 
 		try {
-			index = await this.generateFromInformationSchema(configId, sampleDatabaseName, databaseService, onProgress);
+			index = await this.generateFromInformationSchema(configId, sampleDatabaseName, databaseService, branch, onProgress);
 		} catch (error) {
 			// Non-fatal: we'll fall back to DESCRIBE-based indexing below.
 		}
@@ -185,7 +291,7 @@ export class SchemaIndexService {
 		if (!index) {
 			// Fallback will report per-table progress from generateFromDescribeFallback().
 			onProgress?.({stage: 'Falling back to DESCRIBE-based indexing...', done: 0, total: 1});
-			index = await this.generateFromDescribeFallback(configId, sampleDatabaseName, databaseService, onProgress);
+			index = await this.generateFromDescribeFallback(configId, sampleDatabaseName, databaseService, branch, onProgress);
 			// Note: We intentionally do not surface lastInfoSchemaError here via return type to keep UI simple.
 			// The caller can log it to the debug window if desired.
 		}
@@ -196,15 +302,22 @@ export class SchemaIndexService {
 		await fs.writeFile(filePath, gz);
 
 		// Update memory cache.
-		this.memoryCache.set(this.buildKey(configId), {index, loadedAtMs: Date.now()});
+		this.memoryCache.set(this.buildKey(configId, branch), {
+			index,
+			loadedAtMs : Date.now(),
+			expiresAtMs: Date.now() + this.cacheTtlMs,
+		});
 
 		onProgress?.({stage: 'Schema index ready', done: infoSchemaStepsTotal, total: infoSchemaStepsTotal});
 		return {
-			exists        : true,
+			exists         : true,
 			filePath,
-			generatedAtIso: index.generatedAtIso,
-			tableCount    : index.tables.length,
-			source        : index.source,
+			generatedAtIso : index.generatedAtIso,
+			tableCount     : index.tables.length,
+			source         : index.source,
+			requestedBranch: branch,
+			branch,
+			fallbackUsed   : false,
 		};
 	}
 
@@ -212,6 +325,7 @@ export class SchemaIndexService {
 		configId: string,
 		databaseName: string,
 		databaseService: DatabaseService,
+		branch: string | undefined,
 		onProgress?: (progress: SchemaIndexProgress) => void,
 	): Promise<SchemaIndexFileV1> {
 		// Keep these aligned with generateIndex() infoSchemaStepsTotal (5).
@@ -348,6 +462,7 @@ export class SchemaIndexService {
 			version           : 1,
 			generatedAtIso    : new Date().toISOString(),
 			configId,
+			branch,
 			sampleDatabaseName: databaseName,
 			source            : 'information_schema',
 			tables,
@@ -358,6 +473,7 @@ export class SchemaIndexService {
 		configId: string,
 		databaseName: string,
 		databaseService: DatabaseService,
+		branch: string | undefined,
 		onProgress?: (progress: SchemaIndexProgress) => void,
 	): Promise<SchemaIndexFileV1> {
 		onProgress?.({stage: 'Listing tables...', done: 0, total: 1});
@@ -411,6 +527,7 @@ export class SchemaIndexService {
 			version           : 1,
 			generatedAtIso    : new Date().toISOString(),
 			configId,
+			branch,
 			sampleDatabaseName: databaseName,
 			source            : 'describe_fallback',
 			tables            : tables.sort((a, b) => a.tableName.localeCompare(b.tableName)),
@@ -500,6 +617,17 @@ export class SchemaIndexService {
 		}
 		const lower = needle.toLowerCase();
 		return index.tables.find((t) => t.tableName.toLowerCase() === lower) ?? null;
+	}
+
+	getLastLoadMeta(): {
+		configId: string;
+		cacheHit: boolean;
+		durationMs: number;
+		requestedBranch?: string;
+		resolvedBranch?: string;
+		fallbackUsed?: boolean
+	} | null {
+		return this.lastLoadMeta;
 	}
 }
 

@@ -7,9 +7,10 @@ interface ConfirmModalProps {
 	message: string;
 	onConfirm: () => void;
 	onCancel: () => void;
+	confirmText?: string;
 }
 
-export function ConfirmModal({isOpen, title, message, onConfirm, onCancel}: ConfirmModalProps): JSX.Element | null {
+export function ConfirmModal({isOpen, title, message, onConfirm, onCancel, confirmText = 'Delete'}: ConfirmModalProps): JSX.Element | null {
 	if (!isOpen) {
 		return null;
 	}
@@ -24,7 +25,7 @@ export function ConfirmModal({isOpen, title, message, onConfirm, onCancel}: Conf
 						Cancel
 					</button>
 					<button className="modal-button confirm" onClick={onConfirm}>
-						Delete
+						{confirmText}
 					</button>
 				</div>
 			</div>

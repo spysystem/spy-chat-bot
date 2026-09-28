@@ -1,6 +1,6 @@
-import Anthropic from '@anthropic-ai/sdk';
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import {LATENCY_FLAGS} from './latency-flags';
 
 export interface VectorDocument {
 	id: string;
@@ -15,9 +15,15 @@ export interface VectorStore {
 
 export class VectorStoreService {
 	private readonly vectorStorePath: string;
-	private store: VectorStore | null = null;
+	private store: VectorStore | null                                                                     = null;
+	private readonly searchCache                                                                          = new Map<string, {
+		results: VectorDocument[];
+		createdAtMs: number
+	}>();
+	private readonly searchCacheTtlMs                                                                     = 5 * 60 * 1000;
+	private lastSearchMeta: { cacheHit: boolean; query: string; topK: number; durationMs: number } | null = null;
 
-	constructor(private apiKey: string) {
+	constructor() {
 		// Path to vector store in assets directory (pre-built)
 		this.vectorStorePath = path.join(__dirname, '../../assets/vector/vector.store');
 	}
@@ -79,13 +85,21 @@ export class VectorStoreService {
 	/**
 	 * Search for relevant documents using a two-stage approach:
 	 *   1. Fast local keyword pre-filter to find the best ~30 candidates
-	 *   2. Claude semantic ranking on the short-list only
-	 *
-	 * This avoids sending all documents (potentially 1000+) to Claude in one prompt.
+	 *   2. Local weighted reranking (provider-agnostic, no model/API calls)
 	 */
 	async search(query: string, topK: number = 3): Promise<VectorDocument[]> {
+		const startMs = Date.now();
 		if (!this.store || this.store.documents.length === 0) {
+			this.lastSearchMeta = {cacheHit: false, query, topK, durationMs: Date.now() - startMs};
 			return [];
+		}
+		const cacheKey = `${query.trim().toLowerCase()}::${topK}`;
+		if (LATENCY_FLAGS.enableRetrievalCaches) {
+			const cached = this.searchCache.get(cacheKey);
+			if (cached && Date.now() - cached.createdAtMs < this.searchCacheTtlMs) {
+				this.lastSearchMeta = {cacheHit: true, query, topK, durationMs: Date.now() - startMs};
+				return cached.results;
+			}
 		}
 
 		// Stage 1: Local keyword pre-filter
@@ -93,80 +107,43 @@ export class VectorStoreService {
 		const candidates    = this.keywordPreFilter(query, maxCandidates);
 
 		if (candidates.length === 0) {
-			return this.store.documents.slice(0, topK);
+			const fallback = this.store.documents.slice(0, topK);
+			if (LATENCY_FLAGS.enableRetrievalCaches) {
+				this.searchCache.set(cacheKey, {results: fallback, createdAtMs: Date.now()});
+			}
+			this.lastSearchMeta = {cacheHit: false, query, topK, durationMs: Date.now() - startMs};
+			return fallback;
 		}
 
-		// If we have very few candidates, skip the Claude call
+		// If we have very few candidates, return directly
 		if (candidates.length <= topK) {
+			if (LATENCY_FLAGS.enableRetrievalCaches) {
+				this.searchCache.set(cacheKey, {results: candidates, createdAtMs: Date.now()});
+			}
+			this.lastSearchMeta = {cacheHit: false, query, topK, durationMs: Date.now() - startMs};
 			return candidates;
 		}
 
-		// Stage 2: Use Claude to semantically rank the short-list
-		const client = new Anthropic({apiKey: this.apiKey});
+		// Stage 2: Local weighted reranking for better precision on the candidate set.
+		const reranked = this.localRerank(query, candidates, topK);
+		if (LATENCY_FLAGS.enableRetrievalCaches) {
+			this.searchCache.set(cacheKey, {results: reranked, createdAtMs: Date.now()});
+		}
+		this.cleanupExpiredCache();
+		this.lastSearchMeta = {cacheHit: false, query, topK, durationMs: Date.now() - startMs};
+		return reranked;
+	}
 
-		// Build a compact document list for the prompt (truncate long documents)
-		const documentsText = candidates
-			.map((doc, index) => {
-				const preview = doc.text.length > 500 ? doc.text.substring(0, 500) + '...' : doc.text;
-				return `[${index}] ${preview}`;
-			})
-			.join('\n\n');
+	getLastSearchMeta(): { cacheHit: boolean; query: string; topK: number; durationMs: number } | null {
+		return this.lastSearchMeta;
+	}
 
-		const prompt = `Du er en assistent der hjælper med at finde relevante dokumenter til en forespørgsel.
-
-Brugerens forespørgsel: "${query}"
-
-Tilgængelige dokumenter:
-${documentsText}
-
-Vælg de ${topK} mest relevante dokumenter til brugerens forespørgsel. Returner KUN en JSON array med document indices (f.eks. [0, 3, 7]).
-Hvis forespørgslen er generel eller ikke specifik, vælg de mest grundlæggende/vigtige dokumenter.`;
-
-		try {
-			const response = await client.messages.create({
-				model     : 'claude-3-5-haiku-20241022',
-				max_tokens: 256,
-				messages  : [
-					{
-						role   : 'user',
-						content: prompt,
-					},
-				],
-			});
-
-			const textContent = response.content.find((c) => c.type === 'text');
-			if (!textContent || textContent.type !== 'text') {
-				return candidates.slice(0, topK);
+	private cleanupExpiredCache(): void {
+		const now = Date.now();
+		for (const [key, value] of this.searchCache.entries()) {
+			if (now - value.createdAtMs >= this.searchCacheTtlMs) {
+				this.searchCache.delete(key);
 			}
-
-			// Extract JSON from response (handle markdown formatting)
-			let jsonText = textContent.text.trim();
-
-			// Remove markdown code blocks if present
-			if (jsonText.includes('```')) {
-				const match = jsonText.match(/```(?:json)?\s*(\[[\s\S]*?])\s*```/);
-				if (match) {
-					jsonText = match[1];
-				}
-			}
-
-			// Find JSON array in the text
-			const arrayMatch = jsonText.match(/\[[\s\S]*?]/);
-			if (!arrayMatch) {
-				console.warn('No JSON array found in Claude response, using fallback');
-				return candidates.slice(0, topK);
-			}
-
-			// Parse the JSON array of indices (indices are relative to candidates array)
-			const selectedIndices = JSON.parse(arrayMatch[0]);
-			return selectedIndices
-				.filter((index: number) => index >= 0 && index < candidates.length)
-				.map((index: number) => candidates[index])
-				.slice(0, topK);
-		} catch (error) {
-			console.error('Error searching vector store:', error);
-			// Fallback: return top keyword-matched candidates
-			return candidates.slice(0, topK);
 		}
 	}
 
@@ -234,5 +211,49 @@ Hvis forespørgslen er generel eller ikke specifik, vælg de mest grundlæggende
 		// Sort by score descending and return top N
 		scored.sort((a, b) => b.score - a.score);
 		return scored.slice(0, maxResults).map((s) => s.doc);
+	}
+
+	/**
+	 * Provider-agnostic local reranking using weighted token and phrase matching.
+	 */
+	private localRerank(query: string, candidates: VectorDocument[], topK: number): VectorDocument[] {
+		const stopWords = new Set([
+			'hvor', 'hvad', 'hvem', 'hvordan', 'hvorfor', 'hvornår', 'kan', 'skal', 'vil',
+			'jeg', 'min', 'mit', 'mine', 'det', 'den', 'der', 'som', 'til', 'med',
+			'fra', 'for', 'ikke', 'har', 'alle', 'this', 'that', 'the', 'and',
+			'with', 'from', 'have', 'show', 'what', 'how', 'where', 'when', 'does',
+		]);
+		const tokens    = (query.toLowerCase().match(/[a-zæøå0-9_]+/gi) || [])
+			.map((t) => t.toLowerCase())
+			.filter((t) => t.length >= 2 && !stopWords.has(t));
+
+		if (tokens.length === 0) {
+			return candidates.slice(0, topK);
+		}
+
+		const phrase = tokens.length >= 2 ? tokens.join(' ') : '';
+		const ranked = candidates
+			.map((doc) => {
+				const textLower = doc.text.toLowerCase();
+				let score       = 0;
+
+				for (const token of tokens) {
+					const regex   = new RegExp(`\\b${token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g');
+					const matches = textLower.match(regex);
+					score += (matches?.length ?? 0) * 3;
+					if (!matches && textLower.includes(token)) {
+						score += 1;
+					}
+				}
+
+				if (phrase && textLower.includes(phrase)) {
+					score += 8;
+				}
+
+				return {doc, score};
+			})
+			.sort((a, b) => b.score - a.score);
+
+		return ranked.slice(0, topK).map((item) => item.doc);
 	}
 }

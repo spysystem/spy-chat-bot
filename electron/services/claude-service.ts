@@ -6,8 +6,23 @@ import type {ChatService} from './chat-service';
 import type {AttachmentMeta, AttachmentService} from './attachment-service';
 import {VectorStoreService} from './vector-store-service';
 import {createClaudeTools, exportToCsvFile} from './claude-tools';
+import {LATENCY_FLAGS} from './latency-flags';
+import {buildFollowUpRetrievalQuery, compactConversationHistory, formatRecentConversationForSummary} from './shared/context-builder';
+import {buildContextBudget} from './shared/context-budget';
+import {buildIntentProfile} from './shared/intent-profile';
+import {loadPromptAsset} from './shared/prompt-asset-loader';
+import {
+	buildAnswerQualityDirective,
+	checkAnswerQuality,
+	formatAnswerEvidenceSummary,
+} from './shared/answer-quality';
+import type {AnswerEvidenceItem} from './shared/answer-quality';
+import type {AiQualityProfile} from './settings-service';
+import type {SpyCodeAiMcpService} from './spy-code-ai-mcp-service';
 
 type ChatMessage = { role: 'user' | 'assistant'; content: any };
+type ClaudeLatencyPhase = 'prepare' | 'preprocess' | 'technical' | 'postprocess' | 'total';
+const SPY_CODE_AI_PROMPT_ASSET = 'spy-code-ai-chatbot.mdc';
 
 export class ClaudeService {
 	private readonly secureStorage: SecureStorageService;
@@ -16,6 +31,8 @@ export class ClaudeService {
 
 	constructor(secureStorage: SecureStorageService) {
 		this.secureStorage = secureStorage;
+		// Warm up vector store in background to reduce first-request latency.
+		void this.ensureVectorStore();
 	}
 
 	private async ensureVectorStore(): Promise<VectorStoreService | null> {
@@ -24,12 +41,7 @@ export class ClaudeService {
 		}
 
 		try {
-			const apiKey = await this.getApiKey();
-			if (!apiKey) {
-				return null;
-			}
-
-			this.vectorStore = new VectorStoreService(apiKey);
+			this.vectorStore = new VectorStoreService();
 			await this.vectorStore.initialize();
 			return this.vectorStore;
 		} catch (error) {
@@ -78,6 +90,7 @@ export class ClaudeService {
 		databaseService: DatabaseService,
 		githubService: GitHubService,
 		schemaIndexService: SchemaIndexService,
+		spyCodeAiMcpService: SpyCodeAiMcpService,
 		chatService: ChatService,
 		attachmentService: AttachmentService,
 		onProgress?: (status: string) => void,
@@ -86,6 +99,7 @@ export class ClaudeService {
 		dbHostOverride?: string,
 		githubBranchOverride?: string,
 		attachments?: AttachmentMeta[],
+		aiQualityProfile: AiQualityProfile = 'maximum_accuracy',
 		onDebugLog?: (type: 'query' | 'tool' | 'api' | 'error' | 'info', category: string, message: string, details?: string) => void,
 		onEvent?: (event: unknown) => void,
 		abortController?: AbortController,
@@ -95,202 +109,20 @@ export class ClaudeService {
 		options?: string[];
 		allowFreeText?: boolean
 	}> {
-		const detectDesiredDetailLevel = (text: string): 'short' | 'medium' | 'detailed' => {
-			const t = text.toLowerCase();
-
-			// If the user explicitly asks for technical artifacts or deeper explanation, allow more detail.
-			const asksForTechnical  = /(\bcode\b|\bkode\b|\bsql\b|\bquery\b|\bklasse\b|\bclass\b|\bfil\b|\bfile\b|\blinje\b|\bline\b|\bstack\b|\btrace\b|\bfejl\b|\berror\b|\bdebug\b|\bipc\b|\belectron\b|\bnode\b|\breact\b|\btypescript\b|\bapi\b)/i
-				.test(t);
-			const asksForMoreDetail = /(\bdetalj|detaljer|uddyb|uddybning|forklar|forklaring|explain|deep|dyb|mere\b)/i
-				.test(t);
-			const asksForSteps      = /(\btrin\b|\bsteps?\b|\bstep-by-step\b|\bpunkt(?:er)?\b|\bcheckliste\b)/i
-				.test(t);
-
-			if (asksForTechnical || asksForMoreDetail) {
-				return 'detailed';
-			}
-			if (asksForSteps) {
-				return 'medium';
-			}
-			return 'short';
+		const requestStartMs = Date.now();
+		const phaseStarts    = new Map<ClaudeLatencyPhase, number>();
+		const phaseDurations = new Map<ClaudeLatencyPhase, number>();
+		const startPhase     = (phase: ClaudeLatencyPhase): void => {
+			phaseStarts.set(phase, Date.now());
 		};
-
-		const looksLikeUiQuestion = (text: string): boolean => {
-			const t = text.toLowerCase();
-			// Danish + English UI intent keywords
-			return /(\bhvordan\b|\bhvor\b|\bklik\b|\bknap\b|\bmenu\b|\bfane\b|\bfelt\b|\bside\b|\bskærm\b|\bui\b|\binterface\b|\bfind\b|\bopret\b|\bredig(é|e)r\b|\bslet\b|\bfilter\b|\bsøg\b|\bexport\b|\budtræk\b|\boversigt\b|\bwhy\b|\bwhere\b|\bbutton\b|\bmenu\b|\bpage\b|\bfield\b)/i
-				.test(t);
+		const endPhase       = (phase: ClaudeLatencyPhase): void => {
+			const started = phaseStarts.get(phase);
+			if (!started) {
+				return;
+			}
+			phaseDurations.set(phase, (phaseDurations.get(phase) || 0) + (Date.now() - started));
 		};
-
-		/**
-		 * Detect if the question is about setting up or configuring an integration.
-		 * These questions MUST search the codebase first to give the COMPLETE picture with ALL critical steps.
-		 * Integration setups often have non-obvious requirements (config tables, API keys, webhooks, linking).
-		 */
-		const detectsIntegrationSetupQuestion = (text: string): boolean => {
-			const t = text.toLowerCase();
-
-			// Setup/configuration intent
-			const setupIntent = /\b(opsæt|opsætte|opsætter|setup|oprette|konfigurer|configure|knytte|knytter|connect|link|forbinde|tilkoble|integrat|integration)\b/i.test(t);
-
-			// Known SPY integrations
-			const integrationMention = /\b(shopify|pos|woocommerce|sitoo|edi|nemedi|dhl|ups|fedex|gls|postnord|bring|webhook|api\s+key)\b/i.test(t);
-
-			// "How do I set up X in Spy" or "how to connect X to Y"
-			if (setupIntent && integrationMention) {
-				return true;
-			}
-
-			// Explicit "how to set up [integration]" patterns
-			if (/\b(hvordan|how)\s+(opsætter|set\s+up|setup|konfigurerer|configure)\s+(jeg|i|we)?\s*(shopify|pos|woo|sitoo|edi|integration)/i.test(t)) {
-				return true;
-			}
-
-			// "knytter til min shop" / "connect to my shop"
-			if (/\b(knytte|connect|link)\s+(til|to)\s+(min|mit|my)\s*(shop|butik)/i.test(t)) {
-				return true;
-			}
-
-			return false;
-		};
-
-		/**
-		 * Detect if the question is about a specific SPY page/module behavior.
-		 * These questions need CODE SEARCH FIRST to understand how the page works.
-		 */
-		const detectsPageModuleQuestion = (text: string): boolean => {
-			const t = text.toLowerCase();
-
-			// Questions about what a page shows or why
-			if (/\b(side(n)?|page|modul|module|skærm|screen|liste|list|oversigt|overview)\s+(viser|shows|har|has)\b/i.test(t)) {
-				return true;
-			}
-
-			// "Why does X show Y" patterns
-			if (/\b(hvorfor|why)\s+(viser|shows|står|er)\b/i.test(t)) {
-				return true;
-			}
-
-			// Specific SPY module mentions with behavioral questions
-			if (/\b(confident|topseller|sales\/create|b2b|b2c|claims|warehouse)\b/i.test(t) &&
-				/\b(viser|shows|default|standard|forkert|wrong|anderledes|different)\b/i.test(t)) {
-				return true;
-			}
-
-			// Questions comparing two views/pages
-			if (/\b(forskellig|different|anderledes|ikke det samme|not the same)\b/i.test(t) &&
-				/\b(side|page|modul|module|sted|place)\b/i.test(t)) {
-				return true;
-			}
-
-			return false;
-		};
-
-		// Status detection removed - vector store knowledge handles this directly.
-
-		/**
-		 * Detect if the question is about a SPY handler, action, modal, or dialog.
-		 * These questions need the TS controller → PHP controller navigation strategy.
-		 */
-		const detectsHandlerOrActionQuestion = (text: string): boolean => {
-			const t = text.toLowerCase();
-
-			// Direct "action-something" or "action_something" mentions
-			if (/\baction[-_]\w+/i.test(t)) {
-				return true;
-			}
-
-			// "spyaction" or "data-spyaction" mentions
-			if (/\b(spy\s*action|data-spyaction)\b/i.test(t)) {
-				return true;
-			}
-
-			// Handler/action keywords combined with SPY context
-			if (/\b(handler|action|modal|dialog|popup|dialogue|dialogboks)\b/i.test(t) &&
-				/\b(spy|modul|module|side|page|knap|button|klik|click|åbn|open|luk|close|viser|shows)\b/i.test(t)) {
-				return true;
-			}
-
-			// "When you click X, a dialog/modal opens" patterns (DA + EN)
-			if (/\b(åbner?|opens?|viser|shows|popper?\s+op|pops?\s+up)\b/i.test(t) &&
-				/\b(dialog|modal|popup|vindue|window|boks|box|formular|form)\b/i.test(t)) {
-				return true;
-			}
-
-			// "Open[Something]" action-style names
-			if (/\bopen[A-Z]\w+/i.test(t) || /\bshow[A-Z]\w+dialog/i.test(t)) {
-				return true;
-			}
-
-			// Questions about what happens when a button is clicked (handler behavior)
-			if (/\b(hvad\s+sker|what\s+happens)\b/i.test(t) &&
-				/\b(klik|click|tryk|press|knap|button)\b/i.test(t)) {
-				return true;
-			}
-
-			return false;
-		};
-
-		/**
-		 * Detect if the question is clearly about data/counts/records that require database access.
-		 * VERY inclusive - better to check DB when unnecessary than miss a DB question.
-		 */
-		const detectsDatabaseQuestion = (text: string): boolean => {
-			const t = text.toLowerCase();
-
-			// Count/aggregate questions
-			if (/\b(hvor\s+mange|how\s+many|antal|count|total|sum|average|gennemsnit)\b/i.test(t)) {
-				return true;
-			}
-
-			// List questions
-			if (/\b(vis\s+(mig\s+)?(alle|en\s+liste)|show\s+(me\s+)?(all|a\s+list)|list\s+all|hvilke|which)\b/i.test(t)) {
-				return true;
-			}
-
-			// Specific record lookups (order, customer, invoice, return, etc.)
-			if (/\b(ordre|order|kunde|customer|faktura|invoice|retur|return|produkt|product|vare|item|leverandør|supplier|brand|sælger|seller|user|bruger)\s*[:#]?\s*\d+\b/i.test(t)) {
-				return true;
-			}
-
-			// Any number that looks like an ID (even standalone numbers > 3 digits)
-			if (/\b(id|nummer|number|#)\s*:?\s*\d+/i.test(t)) {
-				return true;
-			}
-			// Standalone numbers that look like IDs (4+ digits or with # prefix)
-			if (/#\d+|\b\d{4,}\b/.test(t)) {
-				return true;
-			}
-
-			// Questions about "i systemet" (in the system) typically need DB
-			if (/\bi\s+(mit\s+)?system(et)?\b/i.test(t)) {
-				return true;
-			}
-
-			// Entity nouns that almost always need DB lookup
-			const entityNouns = /\b(brugere?|users?|kunder?|customers?|ordrer?|orders?|produkter?|products?|varer?|items?|fakturaer?|invoices?|returneringer?|returns?|leverandører?|suppliers?|brands?|sælgere?|sellers?|lager|stock|inventory|shipments?|forsendelser?|betalinger?|payments?)\b/i;
-			if (entityNouns.test(t)) {
-				return true;
-			}
-
-			// Questions about status, amounts, dates
-			if (/\b(status|saldo|balance|beløb|amount|pris|price|dato|date|oprettet|created|ændret|changed|aktiv|active|inaktiv|inactive|disabled)\b/i.test(t)) {
-				return true;
-			}
-
-			// Investigation questions
-			if (/\b(hvorfor|why|hvornår|when|hvem|who|tjek|check|undersøg|investigate|find\s+ud\s+af|find\s+out)\b/i.test(t)) {
-				return true;
-			}
-
-			// Module mentions (SPY modules)
-			if (/\b(sales|b2b|b2c|shopify|edi|claims|warehouse|shipping|confident)\b/i.test(t)) {
-				return true;
-			}
-
-			return false;
-		};
-
+		startPhase('prepare');
 		const extractSearchKeywords = (text: string, max: number = 4): string[] => {
 			const stop  = new Set([
 				'hvordan', 'hvor', 'hvad', 'hvem', 'hvorfor', 'kan', 'jeg', 'vi', 'man', 'min', 'mit', 'mine',
@@ -303,6 +135,37 @@ export class ClaudeService {
 			return Array.from(new Set(words)).slice(0, max);
 		};
 
+		const buildUiGroundingQueries = (text: string): string[] => {
+			const keywords      = extractSearchKeywords(text, 5);
+			const baseTerms     = keywords.length > 0 ? keywords : [text];
+			const workflowTerms = /\b(open|åbn|find|gå til|where|hvor|create|opret|new|ny)\b/i.test(text)
+				? ['menu', 'navigation', 'sidebar', 'open', 'index']
+				: ['menu', 'navigation', 'entry', 'route'];
+			const querySets     = [
+				[...baseTerms, ...workflowTerms],
+				['path:public/javascript/Controller', ...baseTerms, 'menu', 'navigation', 'open'],
+				[...baseTerms, 'entry', 'menu', 'nav', 'route', 'overview'],
+				[...baseTerms, 'create', 'open', 'action', 'spyaction', 'dialog'],
+			];
+			return querySets
+				.map((parts) => Array.from(new Set(parts.filter(Boolean))).slice(0, 7).join(' '))
+				.filter((query, index, arr) => query.trim() !== '' && arr.indexOf(query) === index);
+		};
+
+		const buildToolsScriptQueries = (text: string): string[] => {
+			const keywords  = extractSearchKeywords(text, 5);
+			const baseTerms = keywords.length > 0 ? keywords : [text];
+			const querySets = [
+				['path:tools', ...baseTerms],
+				['path:customer-scripts', ...baseTerms],
+				['path:public/javascript/Controller', ...baseTerms, 'tool'],
+				[...baseTerms, 'tools', 'script'],
+			];
+			return querySets
+				.map((parts) => Array.from(new Set(parts.filter(Boolean))).slice(0, 7).join(' '))
+				.filter((query, index, arr) => query.trim() !== '' && arr.indexOf(query) === index);
+		};
+
 		const formatUiCodeSearchResults = (results: Array<{ path: string; matches: string[] }>): string => {
 			if (!results || results.length === 0) {
 				return '';
@@ -310,9 +173,30 @@ export class ClaudeService {
 			const lines: string[] = [];
 			lines.push('UI CODE SEARCH RESULTS (SPY REPO)');
 			lines.push('Use these to ground exact menu/button/field labels. Do NOT invent labels.');
+			lines.push('Prioritize menu entry points, navigation labels, route/index pages, and open/create triggers before explaining fields.');
 			for (const r of results.slice(0, 5)) {
 				lines.push(`- ${r.path}`);
 				for (const m of (r.matches || []).slice(0, 3)) {
+					const frag = String(m || '').replace(/\s+/g, ' ').trim();
+					if (frag) {
+						lines.push(`  - ${frag}`);
+					}
+				}
+			}
+			return lines.join('\n');
+		};
+
+		const formatToolsCodeSearchResults = (results: Array<{ path: string; matches: string[] }>): string => {
+			if (!results || results.length === 0) {
+				return '';
+			}
+			const lines: string[] = [];
+			lines.push('TOOLS/SCRIPTS CODE SEARCH RESULTS (SPY REPO)');
+			lines.push('Use these to ground tool/script answers before considering UI pages.');
+			lines.push('Prioritize matches inside tools or customer-scripts directories.');
+			for (const r of results.slice(0, 6)) {
+				lines.push(`- ${r.path}`);
+				for (const m of (r.matches || []).slice(0, 4)) {
 					const frag = String(m || '').replace(/\s+/g, ' ').trim();
 					if (frag) {
 						lines.push(`  - ${frag}`);
@@ -342,20 +226,19 @@ export class ClaudeService {
 		};
 
 		// Get database connection info for context
+		const allConfigs = await databaseService.getConfigs();
 		let dbServerHost = '';
 		if (dbHostOverride && String(dbHostOverride).trim() !== '') {
 			dbServerHost = String(dbHostOverride).trim();
 		} else if (databaseIds.length > 0) {
-			const configs = await databaseService.getConfigs();
-			const config  = configs.find((c) => c.id === databaseIds[0]);
+			const config = allConfigs.find((c) => c.id === databaseIds[0]);
 			if (config) {
 				dbServerHost = config.host;
 			}
 		}
 		let dbIdContext = '';
 		if (databaseIds.length > 0) {
-			const configs = await databaseService.getConfigs();
-			const allowed = configs.filter((c) => databaseIds.includes(c.id));
+			const allowed = allConfigs.filter((c) => databaseIds.includes(c.id));
 			if (allowed.length > 0) {
 				dbIdContext = allowed.map((c) => `- ${c.name}: ${c.id}`).join('\n');
 			}
@@ -370,10 +253,12 @@ export class ClaudeService {
 		onProgress?.('Preparing tools...');
 
 		const queryResults: Array<{ query: string; data: any[] }> = [];
+		const evidenceItems: AnswerEvidenceItem[]                 = [];
 		const {tools, resetSearchCounter}                         = await createClaudeTools({
 			databaseService,
 			githubService,
 			schemaIndexService,
+			spyCodeAiMcpService,
 			databaseIds,
 			databaseName,
 			dbHostOverride,
@@ -381,15 +266,23 @@ export class ClaudeService {
 			onProgress,
 			onDebugLog,
 			queryResults,
+			evidenceItems,
 		});
+		const claudeAgentMaxIterations                            = aiQualityProfile === 'balanced' ? 40 : 75;
+		onDebugLog?.('info', 'Claude Quality', `Quality profile: ${aiQualityProfile}`, `agentMaxIterations=${claudeAgentMaxIterations}`);
+		const intent        = buildIntentProfile(userMessage);
+		const contextBudget = buildContextBudget(intent);
+		endPhase('prepare');
 
 
 		// Start conversation with history if provided
 		const messages: ChatMessage[] = [];
 
 		if (conversationHistory && conversationHistory.length > 0) {
-			// Add all previous messages
-			for (const msg of conversationHistory) {
+			const compactedHistory = compactConversationHistory(conversationHistory, contextBudget.historyMessages);
+			onDebugLog?.('info', 'Context', `History compaction: ${conversationHistory.length} -> ${compactedHistory.length}`);
+			// Add previous messages
+			for (const msg of compactedHistory) {
 				messages.push({
 					role   : msg.role as 'user' | 'assistant',
 					content: msg.content,
@@ -400,39 +293,41 @@ export class ClaudeService {
 		// Add the new user message (with optional attachments).
 		// TanStack AI ContentPart format:
 		//   TextPart:  { type: 'text', content: string }
-		//   ImagePart: { type: 'image', source: { type: 'data' | 'url', value: string }, metadata?: { mediaType } }
+		//   ImagePart: { type: 'image', source: { type: 'data' | 'url', value: string, mimeType: string } }
 		let userText = userMessage;
 		const contentBlocks: Array<{
 			type: string;
 			content?: string;
-			source?: { type: 'url' | 'data'; value: string };
+			source?: { type: 'url' | 'data'; value: string; mimeType?: string };
 			metadata?: { mediaType?: string };
 		}>           = [];
 		try {
 			if (attachments && attachments.length > 0) {
 				onProgress?.(`Processing ${attachments.length} attachment(s)...`);
-				for (const att of attachments) {
+				const processed = await Promise.all(attachments.map(async (att) => {
 					if (att.mimeType && att.mimeType.startsWith('image/')) {
-						const buf    = await attachmentService.readAttachmentBuffer(att.storedPath);
-						const base64 = buf.toString('base64');
+						const buf = await attachmentService.readAttachmentBuffer(att.storedPath);
+						return {att, imageBase64: buf.toString('base64'), extracted: null as null | { text: string; truncated: boolean }};
+					}
+					const extracted = await attachmentService.extractTextForClaude(att.storedPath, att.mimeType, 40_000);
+					return {att, imageBase64: null as string | null, extracted};
+				}));
+				for (const item of processed) {
+					if (item.imageBase64 && item.att.mimeType) {
 						contentBlocks.push({
-							type    : 'image',
-							source  : {
-								type : 'data',
-								value: base64,
-							},
-							metadata: {
-								mediaType: att.mimeType as string,
+							type  : 'image',
+							source: {
+								type    : 'data',
+								value   : item.imageBase64,
+								mimeType: item.att.mimeType as string,
 							},
 						});
 						continue;
 					}
-
-					const extracted = await attachmentService.extractTextForClaude(att.storedPath, att.mimeType, 40_000);
-					if (extracted.text.trim() !== '') {
-						userText += `\n\nATTACHMENT: ${att.originalName} (${att.mimeType}, ${Math.round(att.sizeBytes / 1024)} KB)\n${extracted.text}${extracted.truncated ? '\n\n[Truncated]' : ''}`;
+					if (item.extracted && item.extracted.text.trim() !== '') {
+						userText += `\n\nATTACHMENT: ${item.att.originalName} (${item.att.mimeType}, ${Math.round(item.att.sizeBytes / 1024)} KB)\n${item.extracted.text}${item.extracted.truncated ? '\n\n[Truncated]' : ''}`;
 					} else {
-						userText += `\n\nATTACHMENT: ${att.originalName} (${att.mimeType}, ${Math.round(att.sizeBytes / 1024)} KB)\n[Binary or unsupported file type for text extraction]`;
+						userText += `\n\nATTACHMENT: ${item.att.originalName} (${item.att.mimeType}, ${Math.round(item.att.sizeBytes / 1024)} KB)\n[Binary or unsupported file type for text extraction]`;
 					}
 				}
 				onDebugLog?.('info', 'Attachments', `Included ${attachments.length} attachment(s) in message`);
@@ -454,137 +349,173 @@ export class ClaudeService {
 			});
 		}
 
-		// For UI questions, proactively search the connected SPY repo for relevant labels/components.
-		let uiCodeSearchSection = '';
-		try {
-			const isUi = looksLikeUiQuestion(userMessage);
-			if (isUi) {
-				await githubService.getConfig();
-				onProgress?.('Searching UI codebase...');
-				const keywords      = extractSearchKeywords(userMessage, 4);
-				// Prefer keyword query; fallback to user text if needed.
-				const query         = keywords.length > 0 ? keywords.join(' ') : userMessage;
-				const uiResults     = await githubService.searchCode(query);
-				uiCodeSearchSection = formatUiCodeSearchResults(uiResults);
-				if (uiResults.length > 0) {
-					onDebugLog?.('info', 'UI Grounding', `Found ${uiResults.length} code search results for: ${query}`);
-				} else {
-					// Always include an explicit "no results" marker to block hallucinations.
-					uiCodeSearchSection = [
-						'UI CODE SEARCH RESULTS (SPY REPO)',
-						`Query: ${query}`,
-						'Results: NONE',
-						'RULE: Do NOT invent file paths, function names, or UI labels. If results are NONE, say you cannot find it and ask for the exact module/page name or a screenshot.',
-					].join('\n');
-					onDebugLog?.('info', 'UI Grounding', `No code search results for: ${query}`);
-				}
-			}
-		} catch (error) {
-			onDebugLog?.('error', 'UI Grounding', 'UI code search failed', String(error));
-		}
-
-		/**
-		 * Broader: any "how to" or "setup" question that benefits from code search.
-		 * Includes integration setup but also generic "hvordan gør jeg X", "where do I configure Y".
-		 */
-		const looksLikeSetupOrHowToQuestion = (text: string): boolean => {
-			const t        = text.toLowerCase();
-			const setupHow = /\b(hvordan|how)\s+(opsætter|gør|konfigurerer|set\s+up|setup|configure|do\s+i)\b/i.test(t)
-				|| /\b(where|hvor)\s+(do\s+i|finder|kan\s+jeg|opretter|konfigurerer)\b/i.test(t)
-				|| /\b(opsæt|opsætte|konfigurer|setup)\s+(jeg|i|we)?\s*(spy|systemet)?/i.test(t);
-			return setupHow || detectsIntegrationSetupQuestion(text);
-		};
-
-		// For integration/setup/how-to questions, proactively search for config, webhooks, linking logic.
-		let integrationCodeSearchSection = '';
-		try {
-			const isIntegrationOrSetup = looksLikeSetupOrHowToQuestion(userMessage);
-			if (isIntegrationOrSetup) {
-				await githubService.getConfig();
-				onProgress?.('Searching integration codebase...');
-				const keywords               = extractSearchKeywords(userMessage, 4);
-				// Integration-specific: add terms that often appear in setup code
-				const integrationTerms       = ['setup', 'config', 'webhook', 'connect', 'integration', 'pos', 'shopify', 'consignment'];
-				const match                  = userMessage.match(/\b(shopify|pos|woocommerce|sitoo|edi|nemedi|webhook)\b/gi);
-				const integrationNames       = match ? [...new Set(match.map((m) => m.toLowerCase()))] : [];
-				const queryParts             = [...keywords, ...integrationNames, ...integrationTerms.slice(0, 2)];
-				const query                  = Array.from(new Set(queryParts)).slice(0, 6).join(' ');
-				const integrationResults     = await githubService.searchCode(query);
-				integrationCodeSearchSection = formatIntegrationCodeSearchResults(integrationResults);
-				if (integrationResults.length > 0) {
-					onDebugLog?.('info', 'Setup/How-to Grounding', `Found ${integrationResults.length} code search results for: ${query}`);
-				} else {
-					integrationCodeSearchSection = [
-						'SETUP/HOW-TO CODE SEARCH RESULTS (SPY REPO)',
-						`Query: ${query}`,
-						'Results: NONE',
-						'RULE: You MUST still use search_code/search_code_context in the tool loop to find the actual setup. Do NOT skip. Try alternative search terms (e.g. config, webhook, setup).',
-					].join('\n');
-					onDebugLog?.('info', 'Setup/How-to Grounding', `No code search results for: ${query}`);
-				}
-			}
-		} catch (error) {
-			onDebugLog?.('error', 'Integration Grounding', 'Integration code search failed', String(error));
-		}
-
+		// Preprocess context fetch: UI grounding, integration grounding, and vector retrieval.
+		startPhase('preprocess');
 		onProgress?.('Searching knowledge base...');
-
-		// Search vector store for relevant context
-		let contextDocuments: string[] = [];
-		try {
+		let uiCodeSearchSection          = '';
+		let toolsCodeSearchSection       = '';
+		let integrationCodeSearchSection = '';
+		let contextDocuments: string[]   = [];
+		const isUi                       = intent.isUiQuestion;
+		const isToolsOrScript            = intent.isToolsOrScriptQuestion;
+		const isIntegrationOrSetup       = intent.isSetupOrHowToQuestion || intent.requiresIntegrationFocus;
+		const loadToolsGrounding         = async (): Promise<void> => {
+			if (!contextBudget.includeToolsGrounding || !isToolsOrScript) {
+				return;
+			}
+			await githubService.getConfig();
+			onProgress?.('Searching tools/scripts codebase...');
+			const queries          = buildToolsScriptQueries(userMessage);
+			const toolBatches      = await Promise.all(queries.map(async (query) => {
+				try {
+					return await githubService.searchCode(query);
+				} catch {
+					return [] as Array<{ path: string; matches: string[] }>;
+				}
+			}));
+			const toolResults      = toolBatches.flat();
+			toolsCodeSearchSection = formatToolsCodeSearchResults(toolResults);
+			if (toolResults.length > 0) {
+				onDebugLog?.('info', 'Tools Grounding', `Found ${toolResults.length} code search results for: ${queries.join(' | ')}`, toolsCodeSearchSection.substring(0, 1200));
+				return;
+			}
+			onDebugLog?.('info', 'Tools Grounding', `No code search results for: ${queries.join(' | ')}`);
+		};
+		const loadUiGrounding            = async (): Promise<void> => {
+			if (!contextBudget.includeUiGrounding || !isUi) {
+				return;
+			}
+			await githubService.getConfig();
+			onProgress?.('Searching UI codebase...');
+			const queries   = buildUiGroundingQueries(userMessage);
+			const uiBatches = await Promise.all(queries.map(async (query) => {
+				try {
+					return await githubService.searchCode(query);
+				} catch {
+					return [] as Array<{ path: string; matches: string[] }>;
+				}
+			}));
+			const uiResults = uiBatches.flat();
+			const meta      = githubService.getLastSearchMeta();
+			if (meta) {
+				onDebugLog?.('info', 'GitHub Cache', `UI search ${meta.cacheHit ? 'hit' : 'miss'} (${meta.durationMs} ms)`, meta.key);
+			}
+			uiCodeSearchSection = formatUiCodeSearchResults(uiResults);
+			if (uiResults.length > 0) {
+				onDebugLog?.('info', 'UI Grounding', `Found ${uiResults.length} code search results for: ${queries.join(' | ')}`, uiCodeSearchSection.substring(0, 1200));
+				return;
+			}
+			uiCodeSearchSection = [
+				'UI CODE SEARCH RESULTS (SPY REPO)',
+				`Queries: ${queries.join(' | ')}`,
+				'Results: NONE',
+				'RULE: Do NOT invent file paths, function names, or UI labels. If results are NONE, say you cannot find it and ask for the exact module/page name or a screenshot.',
+			].join('\n');
+			onDebugLog?.('info', 'UI Grounding', `No code search results for: ${queries.join(' | ')}`);
+		};
+		const loadIntegrationGrounding   = async (): Promise<void> => {
+			if (!contextBudget.includeIntegrationGrounding || !isIntegrationOrSetup) {
+				return;
+			}
+			await githubService.getConfig();
+			onProgress?.('Searching integration codebase...');
+			const keywords           = extractSearchKeywords(userMessage, 4);
+			const integrationTerms   = ['setup', 'config', 'webhook', 'connect', 'integration', 'pos', 'shopify', 'consignment'];
+			const match              = userMessage.match(/\b(shopify|pos|woocommerce|sitoo|edi|nemedi|webhook)\b/gi);
+			const integrationNames   = match ? [...new Set(match.map((m) => m.toLowerCase()))] : [];
+			const queryParts         = [...keywords, ...integrationNames, ...integrationTerms.slice(0, 2)];
+			const query              = Array.from(new Set(queryParts)).slice(0, 6).join(' ');
+			const integrationResults = await githubService.searchCode(query);
+			const meta               = githubService.getLastSearchMeta();
+			if (meta) {
+				onDebugLog?.('info', 'GitHub Cache', `Integration search ${meta.cacheHit ? 'hit' : 'miss'} (${meta.durationMs} ms)`, meta.key);
+			}
+			integrationCodeSearchSection = formatIntegrationCodeSearchResults(integrationResults);
+			if (integrationResults.length > 0) {
+				onDebugLog?.('info', 'Setup/How-to Grounding', `Found ${integrationResults.length} code search results for: ${query}`);
+				return;
+			}
+			integrationCodeSearchSection = [
+				'SETUP/HOW-TO CODE SEARCH RESULTS (SPY REPO)',
+				`Query: ${query}`,
+				'Results: NONE',
+				'RULE: You MUST still use search_code/search_code_context in the tool loop to find the actual setup. Do NOT skip. Try alternative search terms (e.g. config, webhook, setup).',
+			].join('\n');
+			onDebugLog?.('info', 'Setup/How-to Grounding', `No code search results for: ${query}`);
+		};
+		const loadVectorContext          = async (): Promise<void> => {
 			const vectorStore = await this.ensureVectorStore();
-			if (vectorStore) {
-				// Build context-aware search query from conversation history
-				let searchQuery = userMessage;
-				if (conversationHistory && conversationHistory.length > 0) {
-					// Add recent user messages to give more context for vector search
-					const recentUserMessages = conversationHistory
-						.filter(msg => msg.role === 'user')
-						.slice(-2) // Last 2 user messages
-						.map(msg => msg.content);
-
-					if (recentUserMessages.length > 0) {
-						searchQuery = [...recentUserMessages, userMessage].join(' ');
-						onDebugLog?.('info', 'Vector Store', `Searching with conversation context (${recentUserMessages.length} previous messages)`);
-					}
-				}
-
-				onDebugLog?.('info', 'Vector Store', `Searching for relevant context for query: "${userMessage.substring(0, 100)}${userMessage.length > 100 ? '...' : ''}"`);
-				const relevantDocs = await vectorStore.search(searchQuery, 3);
-				contextDocuments   = relevantDocs.map((doc) => doc.text);
-
-				// Log each found document
-				if (relevantDocs.length > 0) {
-					onDebugLog?.('info', 'Vector Store', `Found ${relevantDocs.length} relevant documents:`);
-					relevantDocs.forEach((doc, index) => {
-						const preview = doc.text.length > 150 ? doc.text.substring(0, 150) + '...' : doc.text;
-						onDebugLog?.('info', 'Vector Store', `  [${index + 1}] ${doc.id}: ${preview}`);
-					});
-				} else {
-					onDebugLog?.('info', 'Vector Store', 'No relevant documents found');
-				}
+			if (!vectorStore) {
+				return;
+			}
+			const searchQuery = buildFollowUpRetrievalQuery(conversationHistory, userMessage, contextBudget.followUpHistoryMessages);
+			if (conversationHistory && conversationHistory.length > 0) {
+				onDebugLog?.('info', 'Vector Store', 'Searching with recent conversation context (user + assistant turns)');
+			}
+			onDebugLog?.('info', 'Vector Store', `Searching for relevant context for query: "${userMessage.substring(0, 100)}${userMessage.length > 100 ? '...' : ''}"`);
+			const relevantDocs = await vectorStore.search(searchQuery, contextBudget.vectorDocuments);
+			const meta         = vectorStore.getLastSearchMeta();
+			if (meta) {
+				onDebugLog?.('info', 'Vector Cache', `Vector search ${meta.cacheHit ? 'hit' : 'miss'} (${meta.durationMs} ms)`);
+			}
+			contextDocuments = relevantDocs.map((doc) => doc.text);
+			if (relevantDocs.length > 0) {
+				onDebugLog?.('info', 'Vector Store', `Found ${relevantDocs.length} relevant documents:`);
+				relevantDocs.forEach((doc, index) => {
+					const preview = doc.text.length > 150 ? doc.text.substring(0, 150) + '...' : doc.text;
+					onDebugLog?.('info', 'Vector Store', `  [${index + 1}] ${doc.id}: ${preview}`);
+				});
+			} else {
+				onDebugLog?.('info', 'Vector Store', 'No relevant documents found');
+			}
+		};
+		try {
+			if (LATENCY_FLAGS.enablePreprocessParallel) {
+				await Promise.all([loadToolsGrounding(), loadUiGrounding(), loadIntegrationGrounding(), loadVectorContext()]);
+			} else {
+				await loadUiGrounding();
+				await loadIntegrationGrounding();
+				await loadVectorContext();
 			}
 		} catch (error) {
-			console.error('Error searching vector store:', error);
-			onDebugLog?.('error', 'Vector Store', 'Error searching for context', String(error));
+			onDebugLog?.('error', 'Preprocess', 'Preprocess step failed', String(error));
 		}
+		endPhase('preprocess');
 
 		onProgress?.('Sending message to Jørgen...');
 
 		// Check schema index availability (if DB is connected)
-		let schemaIndexInfo: { exists: boolean; generatedAtIso?: string; source?: string; tableCount?: number } | null = null;
-		if (databaseName && databaseIds.length > 0) {
+		const resolvedGitHubConfig = await githubService.getConfig();
+		let schemaIndexInfo: {
+			exists: boolean;
+			generatedAtIso?: string;
+			source?: string;
+			tableCount?: number;
+			branch?: string;
+			fallbackUsed?: boolean
+		} | null                   = null;
+		if (contextBudget.includeDatabaseContext && databaseName && databaseIds.length > 0) {
 			try {
-				const configs = await databaseService.getConfigs();
-				const config  = configs.find((c) => c.id === databaseIds[0]);
+				const config = allConfigs.find((c) => c.id === databaseIds[0]);
 				if (config) {
-					const index = await schemaIndexService.loadIndex(config.id);
+					const schemaBranch = githubBranchOverride?.trim() || resolvedGitHubConfig?.branch?.trim() || undefined;
+					const index        = await schemaIndexService.loadIndex(config.id, {
+						branch          : schemaBranch,
+						fallbackBranches: resolvedGitHubConfig?.branch ? [resolvedGitHubConfig.branch] : [],
+					});
+					const indexMeta    = schemaIndexService.getLastLoadMeta();
+					if (indexMeta) {
+						const branchMeta = indexMeta.resolvedBranch ? ` -> ${indexMeta.resolvedBranch}${indexMeta.fallbackUsed ? ' (fallback)' : ''}` : '';
+						onDebugLog?.('info', 'Schema Cache', `${indexMeta.cacheHit ? 'hit' : 'miss'} for ${indexMeta.configId}${branchMeta} (${indexMeta.durationMs} ms)`);
+					}
 					if (index) {
 						schemaIndexInfo = {
 							exists        : true,
 							generatedAtIso: index.generatedAtIso,
 							source        : index.source,
 							tableCount    : index.tables.length,
+							branch        : index.branch,
+							fallbackUsed  : indexMeta?.fallbackUsed,
 						};
 					} else {
 						schemaIndexInfo = {exists: false};
@@ -597,7 +528,7 @@ export class ClaudeService {
 		}
 
 		// Detect if question is about a page/module (needs code search first)
-		const requiresCodeFirst = detectsPageModuleQuestion(userMessage);
+		const requiresCodeFirst = intent.requiresCodeFirst;
 		if (requiresCodeFirst) {
 			onDebugLog?.('info', 'Detection', 'Page/Module question detected - will require code search first');
 		}
@@ -617,7 +548,7 @@ DO NOT just query the database with your own logic. FIND THE PAGE'S LOGIC FIRST.
 		// the correct filtering logic for active entities directly.
 
 		// Detect if question is about a handler/action/modal
-		const requiresHandlerNav = detectsHandlerOrActionQuestion(userMessage);
+		const requiresHandlerNav = intent.requiresHandlerNav;
 		if (requiresHandlerNav) {
 			onDebugLog?.('info', 'Detection', 'Handler/Action/Modal question detected - will use handler navigation strategy');
 		}
@@ -647,7 +578,7 @@ FIELD VISIBILITY (CRITICAL):
 			: '';
 
 		// Detect if question requires database (counts, lookups, records)
-		const requiresDatabase = detectsDatabaseQuestion(userMessage);
+		const requiresDatabase = intent.requiresDatabase;
 		if (requiresDatabase) {
 			onDebugLog?.('info', 'Detection', 'Database question detected - will require database access');
 		}
@@ -663,7 +594,7 @@ DO NOT answer without querying the database first. DO NOT say "I don't have acce
 			: '';
 
 		// Detect if question is about integration setup (Shopify, POS, WooCommerce, etc.)
-		const requiresIntegrationFocus = detectsIntegrationSetupQuestion(userMessage);
+		const requiresIntegrationFocus = intent.requiresIntegrationFocus;
 		if (requiresIntegrationFocus) {
 			onDebugLog?.('info', 'Detection', 'Integration setup question detected - will require code-grounded complete answer');
 		}
@@ -688,18 +619,38 @@ If you are unsure about a step, search for it - do not assume.
 Feel free to ask clarifying questions whenever it would help tailor the answer (e.g. "Do you already have a Shopify shop set up?", which module, new vs existing setup, online vs POS).
 `
 			: '';
+		const toolsScriptDirective = isToolsOrScript
+			? `
+**TOOLS/SCRIPT CODE-FIRST**
+This question mentions tools or scripts.
+You MUST:
+1. FIRST search the codebase with path-focused queries for path:tools and path:customer-scripts
+2. Prefer tool/script implementation files over UI pages, forms, or settings screens
+3. Only switch to UI/navigation guidance if the user explicitly asks how to reach it in the menu
+`
+			: '';
+		const hasSpyCodeAi         = await spyCodeAiMcpService.isConfigured();
+		const spyCodeAiPrompt      = hasSpyCodeAi ? await loadPromptAsset(SPY_CODE_AI_PROMPT_ASSET) : '';
+		if (spyCodeAiPrompt) {
+			onDebugLog?.('info', 'System Prompt', 'Including spy-code-ai MCP guidance');
+		}
 
 		// Build system prompt
-		if (codeFirstDirective || databaseDirective || handlerDirective || integrationDirective) {
+		if (codeFirstDirective || databaseDirective || handlerDirective || integrationDirective || toolsScriptDirective) {
 			const activeDirectives: string[] = [];
 			if (codeFirstDirective) activeDirectives.push('CODE_FIRST');
 			if (handlerDirective) activeDirectives.push('HANDLER_NAV');
 			if (databaseDirective) activeDirectives.push('DATABASE_REQUIRED');
 			if (integrationDirective) activeDirectives.push('INTEGRATION_COMPLETE');
+			if (toolsScriptDirective) activeDirectives.push('TOOLS_FIRST');
 			onDebugLog?.('info', 'System Prompt', `Active directives: ${activeDirectives.join(', ')}`);
 		}
 		let systemPrompt = `You are a helpful assistant that answers questions accurately and clearly. ALWAYS respond in the same language as the user's question.
-${codeFirstDirective}${handlerDirective}${databaseDirective}${integrationDirective}
+${codeFirstDirective}${handlerDirective}${databaseDirective}${integrationDirective}${toolsScriptDirective}
+${spyCodeAiPrompt ? `
+SPY CODE AI MCP GUIDANCE:
+${spyCodeAiPrompt}
+` : ''}
 
 RESEARCH & THOROUGHNESS (ALWAYS — applies to EVERY question):
 - The SPY codebase and database are the source of truth. Always search before answering. Do not rely on general knowledge.
@@ -736,6 +687,7 @@ GROUNDING & ACCURACY (CRITICAL):
 - NEVER invent file paths, function names, class names, SQL queries, or UI labels.
 - NEVER invent menu paths, navigation steps, or "Settings → X → Y" that you did not see in the code. If you cannot find "Settings → Integration → Shopify → Create Special Styles" (or similar) in search_code/read_file, DO NOT include it. Invented paths mislead users.
 - Only claim a file/function/label exists if you saw it in tool output (search_code/read_file/describe_table/query results) during THIS run.
+- Do NOT use generic uncertainty headings like "Usikkert / ikke fuldt verificeret". If a caveat is needed, make it specific: exactly what could not be verified and which evidence would be needed.
 - If UI code search results are empty, say so and ask for the exact module/page name (English SPY UI label) or a screenshot.
 - When explaining code behavior, cite the exact file path(s) you saw in tool output. If you cannot cite any file path, do NOT claim code details.
 - When you use search_code, pick the best file and use read_file. Do NOT loop search_code repeatedly without reading files.
@@ -894,17 +846,21 @@ When a file is too large and gets truncated (>500 lines):
 
 		// Load working summary for this chat (if present)
 		let workingSummaryText = '';
-		try {
-			const chatRecord = await chatService.getChat(chatId);
-			const ws         = (chatRecord as any)?.workingSummary?.text ? String((chatRecord as any).workingSummary.text) : '';
-			if (ws.trim() !== '') {
-				workingSummaryText = ws.trim();
-				onDebugLog?.('info', 'Working Summary', `Loaded existing summary (${workingSummaryText.length} chars)`, workingSummaryText.substring(0, 200) + (workingSummaryText.length > 200 ? '...' : ''));
-			} else {
-				onDebugLog?.('info', 'Working Summary', 'No existing summary for this chat');
+		if (contextBudget.includeWorkingSummary) {
+			try {
+				const chatRecord = await chatService.getChat(chatId);
+				const ws         = (chatRecord as any)?.workingSummary?.text ? String((chatRecord as any).workingSummary.text) : '';
+				if (ws.trim() !== '') {
+					workingSummaryText = ws.trim();
+					onDebugLog?.('info', 'Working Summary', `Loaded existing summary (${workingSummaryText.length} chars)`, workingSummaryText.substring(0, 200) + (workingSummaryText.length > 200 ? '...' : ''));
+				} else {
+					onDebugLog?.('info', 'Working Summary', 'No existing summary for this chat');
+				}
+			} catch (error) {
+				onDebugLog?.('error', 'Working Summary', 'Failed to load working summary', String(error));
 			}
-		} catch (error) {
-			onDebugLog?.('error', 'Working Summary', 'Failed to load working summary', String(error));
+		} else {
+			onDebugLog?.('info', 'Working Summary', 'Skipped by context budget');
 		}
 
 		if (workingSummaryText) {
@@ -934,6 +890,11 @@ NOTE: Table and column names in this summary are from PREVIOUS conversation turn
 		// Add UI code grounding context (if present)
 		if (uiCodeSearchSection) {
 			systemPrompt += `\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n${uiCodeSearchSection}\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+		}
+
+		// Add tools/script grounding context (if present)
+		if (toolsCodeSearchSection) {
+			systemPrompt += `\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n${toolsCodeSearchSection}\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
 		}
 
 		// Add integration code grounding context (if integration setup question)
@@ -1033,7 +994,7 @@ When asked which fields a form/dialog shows:
 
 LOCAL SCHEMA INDEX:
 ${schemaIndexInfo?.exists
-				? `- Status: AVAILABLE\n- Generated: ${schemaIndexInfo.generatedAtIso}\n- Tables: ${schemaIndexInfo.tableCount}\n- Source: ${schemaIndexInfo.source}\n- IMPORTANT: Prefer schema-index tools (search_schema / get_table_schema_cached) with dbId for table/column discovery.`
+				? `- Status: AVAILABLE\n- Generated: ${schemaIndexInfo?.generatedAtIso}\n- Tables: ${schemaIndexInfo?.tableCount}\n- Source: ${schemaIndexInfo?.source}\n- Branch: ${schemaIndexInfo?.branch || 'global'}${schemaIndexInfo?.fallbackUsed ? ' (fallback)' : ''}\n- IMPORTANT: Prefer schema-index tools (search_schema / get_table_schema_cached) with dbId for table/column discovery.`
 				: `- Status: NOT AVAILABLE\n- Recommendation: Ask the user to generate it in Settings → Database Connection → Database Schema Index.\n- Until then, use describe_table with dbId when you must verify columns.`}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1183,6 +1144,7 @@ OUTPUT RULES
 
 		// First, let Claude research and gather information without restrictions
 		onDebugLog?.('api', 'Claude API', `Sending initial message: "${userMessage.substring(0, 100)}${userMessage.length > 100 ? '...' : ''}"`);
+		startPhase('technical');
 		if (conversationHistory && conversationHistory.length > 0) {
 			onDebugLog?.('api', 'Claude API', `Including ${conversationHistory.length} messages from conversation history`);
 		}
@@ -1218,11 +1180,11 @@ OUTPUT RULES
 		let clarificationRequest: { question: string; options?: string[]; allowFreeText?: boolean } | null = null;
 		{
 			const stream = chat({
-				adapter          : createAnthropicChat('claude-sonnet-4-5', apiKey),
+				adapter          : createAnthropicChat('claude-sonnet-4-6' as 'claude-sonnet-4-5', apiKey),
 				messages,
 				tools,
 				systemPrompts    : [systemPrompt],
-				agentLoopStrategy: maxIterations(75),
+				agentLoopStrategy: maxIterations(claudeAgentMaxIterations),
 				maxTokens        : 32_000,
 				abortController,
 				modelOptions     : {
@@ -1321,7 +1283,9 @@ OUTPUT RULES
 			};
 		}
 
-		detailedAnswer = sanitizeAssistantAnswer(detailedAnswer);
+		detailedAnswer      = sanitizeAssistantAnswer(detailedAnswer);
+		let evidenceSummary = formatAnswerEvidenceSummary(evidenceItems);
+		onDebugLog?.('info', 'Answer Evidence', `Captured ${evidenceItems.length} evidence item(s)`, evidenceSummary);
 
 		// ── Completion guarantee ──────────────────────────────────────────────────
 		// When the agent loop was exhausted (hit maxIterations) or the answer is
@@ -1354,6 +1318,8 @@ ${detailedAnswer.length > 3000 ? detailedAnswer.substring(detailedAnswer.length 
 ALL DATABASE QUERY RESULTS YOU OBTAINED (${queryResults.length} queries):
 ${queryDataSummary}
 
+${buildAnswerQualityDirective(evidenceSummary)}
+
 RULES:
 - Answer in the SAME LANGUAGE as the user's question.
 - Provide a COMPLETE answer based on the data above.
@@ -1361,11 +1327,12 @@ RULES:
 - Do NOT say you need more data — use what you have.
 - Do NOT narrate your process. Just give the answer.
 - If some queries returned empty results, mention what was NOT found.
-- If you can draw a conclusion from the data, do so clearly.`;
+- If you can draw a conclusion from the data, do so clearly.
+- Do NOT use a generic uncertainty heading like "Usikkert / ikke fuldt verificeret" when verified evidence supports an answer.`;
 
 				let completionText     = '';
 				const completionStream = chat({
-					adapter          : createAnthropicChat('claude-sonnet-4-5', apiKey),
+					adapter          : createAnthropicChat('claude-sonnet-4-6' as 'claude-sonnet-4-5', apiKey),
 					messages         : [...messages, {role: 'assistant', content: detailedAnswer}, {role: 'user', content: completionPrompt}],
 					tools,
 					systemPrompts    : [systemPrompt],
@@ -1382,7 +1349,8 @@ RULES:
 				const completed = sanitizeAssistantAnswer(completionText.trim());
 				if (completed && completed.length > 50) {
 					// Append the completion to the detailed answer so the full investigation is preserved
-					detailedAnswer = sanitizeAssistantAnswer(`${detailedAnswer}\n\n${completed}`);
+					detailedAnswer  = sanitizeAssistantAnswer(`${detailedAnswer}\n\n${completed}`);
+					evidenceSummary = formatAnswerEvidenceSummary(evidenceItems);
 					onDebugLog?.('info', 'Completion Guarantee', `Completion step produced ${completed.length} chars`);
 				} else {
 					onDebugLog?.('info', 'Completion Guarantee', 'Completion step produced insufficient output — keeping original');
@@ -1400,10 +1368,15 @@ RULES:
 			onDebugLog?.('info', 'Claude API', 'Question required database but no queries were made - forcing retry with database tools');
 		}
 
-		if (isNonAnswer(detailedAnswer) || requiredDatabaseButNoQueries) {
+		const qualityCheck = checkAnswerQuality(detailedAnswer, evidenceItems, {
+			requiredDatabaseButNoQueries,
+			midInvestigation: looksLikeMidInvestigation(detailedAnswer) && queryResults.length === 0,
+			nonAnswer       : isNonAnswer(detailedAnswer),
+		});
+		if (qualityCheck.needsRetry) {
 			// Reset search counter so the retry gets fresh search quota
 			resetSearchCounter();
-			onDebugLog?.('info', 'Claude API', 'Technical answer was non-responsive; retrying with stricter answer request (search counter reset)');
+			onDebugLog?.('info', 'Claude API', `Technical answer needs quality retry: ${qualityCheck.reasons.join('; ')} (search counter reset)`);
 			try {
 				// Include the query results in the retry prompt so the model knows what data it found
 				const queryResultsSummary = queryResults.length > 0
@@ -1429,12 +1402,15 @@ DO NOT ANSWER WITHOUT QUERYING THE DATABASE FIRST.`
 						role   : 'user',
 						content: `Your previous answer was not useful.${forceToolUseDirective}${queryResultsSummary}
 
+${buildAnswerQualityDirective(evidenceSummary)}
+
 RULES:
 - Answer in the SAME LANGUAGE as the user's question.
 - Do NOT narrate your process.
 - Use the data from your tool calls to answer the question directly.
 - Do NOT say "I cannot answer without..." - use the database tools NOW.
 - Do NOT ask for order_id, database ID, or other information you can query.
+- Do NOT use a generic "Usikkert / ikke fuldt verificeret" heading. If something remains unverified, state the exact missing evidence in one short sentence.
 
 ${requiredDatabaseButNoQueries ? 'USE get_table_schema_cached AND query_database NOW, THEN provide the answer with the REAL numbers from the query.' : 'PROVIDE THE FINAL ANSWER NOW using the data you found.'}`,
 					},
@@ -1443,7 +1419,7 @@ ${requiredDatabaseButNoQueries ? 'USE get_table_schema_cached AND query_database
 				// Use streaming to properly capture tool calls and text
 				let retryText     = '';
 				const retryStream = chat({
-					adapter          : createAnthropicChat('claude-sonnet-4-5', apiKey),
+					adapter          : createAnthropicChat('claude-sonnet-4-6' as 'claude-sonnet-4-5', apiKey),
 					messages         : retryMessages,
 					tools,
 					systemPrompts    : [systemPrompt],
@@ -1464,7 +1440,8 @@ ${requiredDatabaseButNoQueries ? 'USE get_table_schema_cached AND query_database
 					if (retried.length < 150 && detailedAnswer.length > 500) {
 						onDebugLog?.('info', 'Technical Retry', `Retry too short (${retried.length} chars); keeping original (${detailedAnswer.length} chars)`);
 					} else {
-						detailedAnswer = retried;
+						detailedAnswer  = retried;
+						evidenceSummary = formatAnswerEvidenceSummary(evidenceItems);
 					}
 				}
 			} catch (error) {
@@ -1500,7 +1477,7 @@ ${tail}`;
 				const continuationResponse = await runChatWithMaxTokensFallback(
 					chat,
 					{
-						adapter  : createAnthropicChat('claude-sonnet-4-5', apiKey),
+						adapter  : createAnthropicChat('claude-sonnet-4-6' as 'claude-sonnet-4-5', apiKey),
 						messages : [{role: 'user', content: continuationPrompt}],
 						maxTokens: 8000,
 						stream   : false,
@@ -1513,6 +1490,46 @@ ${tail}`;
 				}
 			} catch (error) {
 				onDebugLog?.('error', 'Claude API', 'Continuation request failed', String(error));
+			}
+		}
+
+		const finalQualityCheck = checkAnswerQuality(detailedAnswer, evidenceItems);
+		if (evidenceItems.length > 0 && finalQualityCheck.needsRetry) {
+			onDebugLog?.('info', 'Claude Quality', `Running final answer cleanup: ${finalQualityCheck.reasons.join('; ')}`);
+			try {
+				const qualityPrompt   = `Rewrite the draft answer into a final user-facing answer using the evidence summary.
+
+ORIGINAL QUESTION:
+${userMessage}
+
+DRAFT ANSWER:
+${detailedAnswer}
+
+${buildAnswerQualityDirective(evidenceSummary)}
+
+RULES:
+- Answer in the SAME LANGUAGE as the user's question.
+- Keep the same facts and do not invent new details.
+- Start with the strongest verified conclusion.
+- Remove generic uncertainty headings like "Usikkert / ikke fuldt verificeret" when verified evidence supports an answer.
+- If any caveat remains, make it specific and short.
+- Output only the final answer.`;
+				const qualityResponse = await runChatWithMaxTokensFallback(
+					chat,
+					{
+						adapter  : createAnthropicChat('claude-sonnet-4-6' as 'claude-sonnet-4-5', apiKey),
+						messages : [{role: 'user', content: qualityPrompt}],
+						maxTokens: 8000,
+						stream   : false,
+					},
+					{onDebugLog, label: 'Claude answer quality cleanup'},
+				);
+				const cleaned         = sanitizeAssistantAnswer(await extractTextFromChatResponse(qualityResponse, onDebugLog, 'Answer Quality Cleanup'));
+				if (cleaned && cleaned.length > 50) {
+					detailedAnswer = cleaned;
+				}
+			} catch (error) {
+				onDebugLog?.('error', 'Claude Quality', 'Final answer cleanup failed', String(error));
 			}
 		}
 
@@ -1530,6 +1547,7 @@ ${tail}`;
 			`Technical phase completed in ${Date.now() - technicalStartMs} ms`,
 			`detailedChars=${detailedAnswer.length}`,
 		);
+		endPhase('technical');
 		// Auto-export CSV if user requested a list/export
 		const exportKeywords  = ['list', 'liste', 'udtræk', 'export', 'eksporter', 'overview', 'oversigt'];
 		const isExportRequest = exportKeywords.some((keyword) => userMessage.toLowerCase().includes(keyword));
@@ -1564,7 +1582,7 @@ ${tail}`;
 					});
 
 					const updatedAnswer = await chat({
-						adapter: createAnthropicChat('claude-sonnet-4-5', apiKey),
+						adapter: createAnthropicChat('claude-sonnet-4-6' as 'claude-sonnet-4-5', apiKey),
 						messages,
 						stream : false,
 					});
@@ -1597,7 +1615,7 @@ CRITICAL: Every number in your answer MUST come from an actual database query re
 			// Use streaming with tools so it can still query if needed
 			let toolOnlyText     = '';
 			const toolOnlyStream = chat({
-				adapter          : createAnthropicChat('claude-sonnet-4-5', apiKey),
+				adapter          : createAnthropicChat('claude-sonnet-4-6' as 'claude-sonnet-4-5', apiKey),
 				messages,
 				tools,
 				systemPrompts    : [systemPrompt],
@@ -1616,7 +1634,7 @@ CRITICAL: Every number in your answer MUST come from an actual database query re
 		// Start a fresh conversation for the simplification step (no history).
 		// IMPORTANT: We intentionally do NOT include conversationHistory here.
 		// Reason: For follow-up questions, history can cause the model to rewrite/summarize an older assistant message.
-		const desiredDetailLevel = detectDesiredDetailLevel(userMessage);
+		const desiredDetailLevel = intent.desiredDetailLevel;
 		const detailedLinesCount = detailedAnswer ? detailedAnswer.split('\n').filter((l) => l.trim() !== '').length : 0;
 
 		// If the technical answer is already short, return it directly as the short answer.
@@ -1672,6 +1690,8 @@ CRITICAL RULES:
 - Keep the meaning and correctness. Do NOT invent details.
 - If the technical answer found no results, say so honestly. Do NOT fabricate.
 - NEVER include or propose write SQL. NEVER ask to "run" anything.
+- Preserve verified conclusions. Do NOT add or keep generic uncertainty labels like "Usikkert", "ikke fuldt verificeret", or "not fully verified" when the technical answer is backed by the evidence summary.
+- If a caveat is needed, make it specific and short: what was not verified and why it matters.
 - **NO DUPLICATION**: Output ONE coherent answer. NEVER output a summary/header followed by the full content again. If the technical answer is already a complete step-by-step guide, either keep it as-is (with minor formatting) or condense it - but do NOT repeat the full guide twice.
 
 ${lengthRule}
@@ -1718,6 +1738,9 @@ CONTENT RULES:
 - REMOVE database structure (table names, column names) from support answers — support staff do not need it.
 - REMOVE display-only fields (read-only, backend reference) from setup steps — only include fields the user can actually configure. Keep API key/credentials when they are editable inputs.
 
+EVIDENCE SUMMARY:
+${evidenceSummary}
+
 INPUTS:
 LATEST USER QUESTION:
 ${userMessage}
@@ -1743,10 +1766,11 @@ ${detailedAnswer}`;
 		// Get the simplified response (no tools needed here, CSV already created)
 		let simplifiedText          = '';
 		const simplificationStartMs = Date.now();
+		startPhase('postprocess');
 		onDebugLog?.('info', 'TanStack AI', 'Simplification phase started');
 		if (hasStreamingConsumer) {
 			const simplifiedStream = chat({
-				adapter  : createAnthropicChat('claude-sonnet-4-5', apiKey),
+				adapter  : createAnthropicChat('claude-sonnet-4-6' as 'claude-sonnet-4-5', apiKey),
 				messages : simplificationMessages,
 				maxTokens: 20_000,
 				abortController,
@@ -1768,7 +1792,7 @@ ${detailedAnswer}`;
 			const simplifiedResponse = await runChatWithMaxTokensFallback(
 				chat,
 				{
-					adapter  : createAnthropicChat('claude-sonnet-4-5', apiKey),
+					adapter  : createAnthropicChat('claude-sonnet-4-6' as 'claude-sonnet-4-5', apiKey),
 					messages : simplificationMessages,
 					maxTokens: 20_000,
 					stream   : false,
@@ -1796,7 +1820,7 @@ ${detailedAnswer}`;
 				const continuationResponse                                                         = await runChatWithMaxTokensFallback(
 					chat,
 					{
-						adapter  : createAnthropicChat('claude-sonnet-4-5', apiKey),
+						adapter  : createAnthropicChat('claude-sonnet-4-6' as 'claude-sonnet-4-5', apiKey),
 						messages : continuationMessages,
 						maxTokens: 32_000,
 						stream   : false,
@@ -1847,148 +1871,179 @@ ${detailedAnswer}`;
 			`simplifiedChars=${simplifiedText.length}`,
 		);
 
-		// Generate an AI title in the background (best-effort).
+		// Generate chat title and working summary (best-effort).
 		let suggestedTitle: string | undefined;
-		try {
-			const chatRecord           = await chatService.getChat(chatId);
-			const systemName           = (chatRecord?.systemName || '').trim();
-			const databaseNameForTitle = (chatRecord?.databaseName || '').trim();
-			const context              = systemName || databaseNameForTitle ? `Context:\n- System: ${systemName || '(none)'}\n- Database: ${databaseNameForTitle || '(none)'}\n` : '';
-
-			const titlePrompt = `Create a short chat title in Danish.\n\nCRITICAL RULES:\n- Output ONLY the title text (no quotes, no prefix, no markdown)\n- 3 to 6 words\n- Must describe the topic (what this chat is about)\n- Avoid filler and function words (no "jeg", "mig", "hjælp", "kan", "vil", "skal", "blevet", "dannet")\n- Prefer concrete nouns + identifiers (return/order numbers, module name, integration name)\n- Use the exact English SPY UI labels if you mention menus/modules/buttons\n\nGood examples:\n- Return 11150 – Shopify webhook\n- NemEDI opsætning og fejlsøgning\n- Claims/Return: Spor oprettelse\n\nBad examples:\n- Sofie Schnoor - dannet blevet hjælpe jeg\n- Jeg vil hjælpe med...\n\n${context}\nLatest user message:\n${userMessage}\n\nAssistant answer:\n${simplifiedText}`;
-
-			// Use Haiku for fast title generation - fallback to Sonnet if empty/error
-			let raw = '';
+		const titleTask   = async (): Promise<string | undefined> => {
 			try {
-				const titleResponse = await chat({
-					adapter  : createAnthropicChat('claude-haiku-4-5', apiKey),
-					messages : [{role: 'user', content: titlePrompt}],
-					maxTokens: 100,
-				});
-				raw                 = await extractTextFromChatResponse(titleResponse, onDebugLog, 'Chat Title (Haiku)');
-			} catch (titleError) {
-				onDebugLog?.('error', 'Chat Title', `Haiku model error: ${titleError instanceof Error ? titleError.message : String(titleError)}`);
-			}
-
-			// If Haiku failed (RUN_ERROR or empty), retry with Sonnet
-			if (!raw || raw.length === 0) {
-				onDebugLog?.('info', 'Chat Title', 'Haiku returned empty, retrying with Sonnet...');
+				const chatRecord           = await chatService.getChat(chatId);
+				const systemName           = (chatRecord?.systemName || '').trim();
+				const databaseNameForTitle = (chatRecord?.databaseName || '').trim();
+				const context              = systemName || databaseNameForTitle ? `Context:\n- System: ${systemName || '(none)'}\n- Database: ${databaseNameForTitle || '(none)'}\n` : '';
+				const titlePrompt          = `Create a short chat title in Danish.\n\nCRITICAL RULES:\n- Output ONLY the title text (no quotes, no prefix, no markdown)\n- 3 to 6 words\n- Must describe the topic (what this chat is about)\n- Avoid filler and function words (no "jeg", "mig", "hjælp", "kan", "vil", "skal", "blevet", "dannet")\n- Prefer concrete nouns + identifiers (return/order numbers, module name, integration name)\n- Use the exact English SPY UI labels if you mention menus/modules/buttons\n\nGood examples:\n- Return 11150 – Shopify webhook\n- NemEDI opsætning og fejlsøgning\n- Claims/Return: Spor oprettelse\n\nBad examples:\n- Sofie Schnoor - dannet blevet hjælpe jeg\n- Jeg vil hjælpe med...\n\n${context}\nLatest user message:\n${userMessage}\n\nAssistant answer:\n${simplifiedText}`;
+				let raw                    = '';
 				try {
-					const sonnetResponse = await chat({
-						adapter  : createAnthropicChat('claude-sonnet-4-5', apiKey),
+					const titleResponse = await chat({
+						adapter  : createAnthropicChat('claude-haiku-4-5', apiKey),
 						messages : [{role: 'user', content: titlePrompt}],
 						maxTokens: 100,
 					});
-					raw                  = await extractTextFromChatResponse(sonnetResponse, onDebugLog, 'Chat Title (Sonnet fallback)');
-				} catch (sonnetError) {
-					onDebugLog?.('error', 'Chat Title', `Sonnet fallback also failed: ${sonnetError instanceof Error ? sonnetError.message : String(sonnetError)}`);
+					raw                 = await extractTextFromChatResponse(titleResponse, onDebugLog, 'Chat Title (Haiku)');
+				} catch (titleError) {
+					onDebugLog?.('error', 'Chat Title', `Haiku model error: ${titleError instanceof Error ? titleError.message : String(titleError)}`);
 				}
-			}
-
-			const candidate = normalizeTitleCandidate(raw);
-			if (isValidTitleCandidate(candidate)) {
-				suggestedTitle = candidate.length > 60 ? `${candidate.substring(0, 57)}...` : candidate;
-			} else {
-				const fallback = generateFallbackTitle({
-					userMessage,
-					assistantAnswer: simplifiedText,
-					systemName,
-				});
+				if (!raw || raw.length === 0) {
+					onDebugLog?.('info', 'Chat Title', 'Haiku returned empty, retrying with Sonnet...');
+					try {
+						const sonnetResponse = await chat({
+							adapter  : createAnthropicChat('claude-sonnet-4-6' as 'claude-sonnet-4-5', apiKey),
+							messages : [{role: 'user', content: titlePrompt}],
+							maxTokens: 100,
+						});
+						raw                  = await extractTextFromChatResponse(sonnetResponse, onDebugLog, 'Chat Title (Sonnet fallback)');
+					} catch (sonnetError) {
+						onDebugLog?.('error', 'Chat Title', `Sonnet fallback also failed: ${sonnetError instanceof Error ? sonnetError.message : String(sonnetError)}`);
+					}
+				}
+				const candidate = normalizeTitleCandidate(raw);
+				if (isValidTitleCandidate(candidate)) {
+					return candidate.length > 60 ? `${candidate.substring(0, 57)}...` : candidate;
+				}
+				const fallback = generateFallbackTitle({userMessage, assistantAnswer: simplifiedText, systemName});
 				if (fallback) {
 					onDebugLog?.('info', 'Chat Title', 'AI title rejected; using fallback', `raw="${raw}" fallback="${fallback}"`);
-					suggestedTitle = fallback;
-				} else {
-					onDebugLog?.('info', 'Chat Title', 'AI title rejected; no fallback available', `raw="${raw}"`);
+					return fallback;
 				}
+				onDebugLog?.('info', 'Chat Title', 'AI title rejected; no fallback available', `raw="${raw}"`);
+				return undefined;
+			} catch (error) {
+				onDebugLog?.('error', 'Chat Title', 'Failed to generate AI title', String(error));
+				return undefined;
 			}
-		} catch (error) {
-			onDebugLog?.('error', 'Chat Title', 'Failed to generate AI title', String(error));
-		}
-
-		// Update working summary in the background (best-effort).
-		// Feed the DETAILED answer (contains SQL, tables, schemas) so the summary
-		// captures technical context for future turns.
-		try {
-			onDebugLog?.('info', 'Working Summary', 'Generating updated summary...');
-			const detailedExcerpt = detailedAnswer && detailedAnswer.length > 3000
-				? detailedAnswer.substring(0, 3000) + '\n[...truncated...]'
-				: (detailedAnswer || simplifiedText);
-
-			const updatePrompt = `You are maintaining a concise "working summary" for an ongoing database support chat.
-Your goal is to preserve enough context so the AI assistant can continue the conversation without losing track of tables, schemas, or previous findings.
+		};
+		const summaryTask = async (): Promise<void> => {
+			try {
+				onDebugLog?.('info', 'Working Summary', 'Generating updated summary...');
+				const detailedExcerpt    = detailedAnswer && detailedAnswer.length > 5000
+					? detailedAnswer.substring(0, 5000) + '\n[...truncated...]'
+					: (detailedAnswer || simplifiedText);
+				const recentConversation = formatRecentConversationForSummary(conversationHistory, 6) || '(none)';
+				const updatePrompt       = `You are maintaining a detailed working summary for an ongoing database and code support chat in the SPY system.
+Your goal is to preserve enough context so the AI assistant can continue the conversation without losing track of prior findings, exact schema details, query patterns, code paths, unresolved hypotheses, and user intent.
 
 Update the existing summary using the latest exchange below.
 
 REQUIRED SECTIONS (use these exact headers):
 
 ## Confirmed Facts
-- Key findings, numbers, and answers established so far (max 8 bullets)
+- Key findings, concrete answers, confirmed business rules, and important numbers established so far
+- Include exact values, statuses, identifiers, and conclusions when they are known
+
+## Latest Answer
+- Preserve the most recent concrete conclusion, distinction, or recommendation the assistant gave
+- Make short follow-up references like "that", "same", "other one", and "instead" understandable from this section
 
 ## Database Context
-- Tables used (with key columns discovered), e.g.: "customers (id, name, type, disabled)"
-- Successful SQL patterns and JOINs that worked
+- Tables used, with key columns discovered, e.g. "customers (id, name, type, disabled)"
+- Successful SQL patterns, joins, filters, and conditions that worked
 - Database name and any schema specifics noted
 - Important column meanings discovered (e.g. "disabled=0 means active")
+- Mention failed assumptions too when useful, e.g. "column X does not exist", "table Y was wrong"
 
-## Current Topic
-- What the user is currently investigating (1-2 bullets)
+## Active Thread
+- What the user is currently investigating
+- What branch, comparison, workflow, record, or module is currently in focus
+- What question still needs to be answered next
+
+## Code Context
+- Relevant files, classes, functions, handlers, or modules identified so far
+- Summarize how the code flow works when it has been investigated
+- Include exact file paths and symbols if they were confirmed in this chat
 
 ## Open Questions
-- Unresolved questions or things to follow up on (max 3 bullets)
+- Unresolved questions, uncertainties, or follow-up checks still needed
+- Keep hypotheses separate from confirmed facts
 
 RULES:
 - Output plain text only (no JSON, no code fences)
-- Max 20 bullet points total across all sections
+- Be detailed but compact. Aim for 4-8 bullets in the biggest sections when there is enough information.
+- Max 32 bullet points total across all sections
 - Remove outdated points
 - Keep table/column names EXACT (they are case-sensitive)
-- If the assistant ran SQL queries, extract the table names and key columns used
+- If the assistant ran SQL queries, extract the table names, key columns, filters, joins, and any important result counts
+- If the assistant inspected code, extract file paths, method names, controller names, and key logic discovered
+- Preserve identifiers, order numbers, return numbers, filenames, and branch/module names when relevant
+- Prefer durable investigative context over polished prose
+- Do NOT omit useful technical context just because support users would not see it; this summary is for the AI assistant only
 
 Existing summary:
 ${workingSummaryText || '(none)'}
+
+Recent conversation:
+${recentConversation}
 
 Latest user message:
 ${userMessage}
 
 Assistant technical answer:
 ${detailedExcerpt}`;
-
-			// Use Haiku for fast summary generation - fallback to Sonnet if empty/error
-			let summaryText = '';
-			try {
-				const summaryResponse = await chat({
-					adapter  : createAnthropicChat('claude-haiku-4-5', apiKey),
-					messages : [{role: 'user', content: updatePrompt}],
-					maxTokens: 1500,
-				});
-				summaryText           = await extractTextFromChatResponse(summaryResponse, onDebugLog, 'Working Summary (Haiku)');
-			} catch (summaryError) {
-				onDebugLog?.('error', 'Working Summary', `Haiku model error: ${summaryError instanceof Error ? summaryError.message : String(summaryError)}`);
-			}
-
-			// If Haiku failed (RUN_ERROR or empty), retry with Sonnet
-			if (!summaryText || summaryText.length === 0) {
-				onDebugLog?.('info', 'Working Summary', 'Haiku returned empty, retrying with Sonnet...');
+				let summaryText          = '';
 				try {
-					const sonnetResponse = await chat({
-						adapter  : createAnthropicChat('claude-sonnet-4-5', apiKey),
+					const summaryResponse = await chat({
+						adapter  : createAnthropicChat('claude-haiku-4-5', apiKey),
 						messages : [{role: 'user', content: updatePrompt}],
-						maxTokens: 1500,
+						maxTokens: 2200,
 					});
-					summaryText          = await extractTextFromChatResponse(sonnetResponse, onDebugLog, 'Working Summary (Sonnet fallback)');
-				} catch (sonnetError) {
-					onDebugLog?.('error', 'Working Summary', `Sonnet fallback also failed: ${sonnetError instanceof Error ? sonnetError.message : String(sonnetError)}`);
+					summaryText           = await extractTextFromChatResponse(summaryResponse, onDebugLog, 'Working Summary (Haiku)');
+				} catch (summaryError) {
+					onDebugLog?.('error', 'Working Summary', `Haiku model error: ${summaryError instanceof Error ? summaryError.message : String(summaryError)}`);
 				}
-			}
-			onDebugLog?.('info', 'Working Summary', `Extracted text length: ${summaryText?.length || 0}`);
-
-			if (summaryText && summaryText.trim().length > 0) {
-				await chatService.setWorkingSummary(chatId, summaryText);
-				onDebugLog?.('info', 'Working Summary', 'Updated working summary', summaryText.substring(0, 300) + (summaryText.length > 300 ? '...' : ''));
-			} else {
+				if (!summaryText || summaryText.length === 0) {
+					onDebugLog?.('info', 'Working Summary', 'Haiku returned empty, retrying with Sonnet...');
+					try {
+						const sonnetResponse = await chat({
+							adapter  : createAnthropicChat('claude-sonnet-4-6' as 'claude-sonnet-4-5', apiKey),
+							messages : [{role: 'user', content: updatePrompt}],
+							maxTokens: 2200,
+						});
+						summaryText          = await extractTextFromChatResponse(sonnetResponse, onDebugLog, 'Working Summary (Sonnet fallback)');
+					} catch (sonnetError) {
+						onDebugLog?.('error', 'Working Summary', `Sonnet fallback also failed: ${sonnetError instanceof Error ? sonnetError.message : String(sonnetError)}`);
+					}
+				}
+				onDebugLog?.('info', 'Working Summary', `Extracted text length: ${summaryText?.length || 0}`);
+				if (summaryText && summaryText.trim().length > 0) {
+					await chatService.setWorkingSummary(chatId, summaryText);
+					onDebugLog?.('info', 'Working Summary', 'Updated working summary', summaryText.substring(0, 300) + (summaryText.length > 300 ? '...' : ''));
+					return;
+				}
 				onDebugLog?.('info', 'Working Summary', 'Summary generation returned empty text - not updating');
+			} catch (error) {
+				onDebugLog?.('error', 'Working Summary', 'Failed to update working summary', String(error));
 			}
-		} catch (error) {
-			onDebugLog?.('error', 'Working Summary', 'Failed to update working summary', String(error));
+		};
+		if (LATENCY_FLAGS.enablePostProcessParallel) {
+			const [title]  = await Promise.all([titleTask(), summaryTask()]);
+			suggestedTitle = title;
+		} else {
+			suggestedTitle = await titleTask();
+			await summaryTask();
+		}
+		endPhase('postprocess');
+		phaseDurations.set('total', Date.now() - requestStartMs);
+		if (LATENCY_FLAGS.enableLatencyMetrics) {
+			onDebugLog?.(
+				'info',
+				'Latency',
+				'Claude latency metrics',
+				JSON.stringify({
+					provider    : 'claude',
+					totalMs     : phaseDurations.get('total') || 0,
+					prepareMs   : phaseDurations.get('prepare') || 0,
+					preprocessMs: phaseDurations.get('preprocess') || 0,
+					technicalMs : phaseDurations.get('technical') || 0,
+					postMs      : phaseDurations.get('postprocess') || 0,
+				}),
+			);
 		}
 
 		return {
@@ -2456,14 +2511,14 @@ function looksLikeMidInvestigation(text: string): boolean {
 	// Check if the answer ends with typical "process narration" patterns
 	// (Claude describing what it's about to do next, or what it just found)
 	const midInvestigationEndings = [
-		/(?:nu\s+(?:skal|kan|vil|tjekker|checker|sammenligner|kigger)\s+jeg)\b/i,
-		/(?:lad\s+mig\s+(?:prøve|tjekke|checke|undersøge|kigge|finde|query|hente|sammenligne))/i,
-		/(?:nu\s+(?:checker|tjekker|henter|sammenligner|querier)\s+(?:jeg|vi))/i,
-		/(?:jeg\s+(?:vil|skal|kan)\s+nu\s+(?:tjekke|checke|undersøge|sammenligne|query))/i,
-		/(?:let\s+me\s+(?:check|try|query|look|search|compare|find|get))/i,
-		/(?:now\s+(?:I\s+(?:can|will|need\s+to)|let's|checking|querying|comparing))/i,
-		/(?:interessant!?\s)/i,
-		/(?:nu\s+har\s+jeg\s+(?:alle?|de|det))/i,
+		/nu\s+(?:skal|kan|vil|tjekker|checker|sammenligner|kigger)\s+jeg\b/i,
+		/lad\s+mig\s+(?:prøve|tjekke|checke|undersøge|kigge|finde|query|hente|sammenligne)/i,
+		/nu\s+(?:checker|tjekker|henter|sammenligner|querier)\s+(?:jeg|vi)/i,
+		/jeg\s+(?:vil|skal|kan)\s+nu\s+(?:tjekke|checke|undersøge|sammenligne|query)/i,
+		/let\s+me\s+(?:check|try|query|look|search|compare|find|get)/i,
+		/now\s+(?:I\s+(?:can|will|need\s+to)|let's|checking|querying|comparing)/i,
+		/interessant!?\s/i,
+		/nu\s+har\s+jeg\s+(?:alle?|de|det)/i,
 	];
 
 	// Check the last 300 chars for mid-investigation patterns
@@ -2477,11 +2532,7 @@ function looksLikeMidInvestigation(text: string): boolean {
 	// If there's no conclusion-like ending (answer, summary, result) and it's long,
 	// it's likely an incomplete investigation.
 	const hasConclusion = /sammenfattende|opsummering|konklusion|resultat(?:et)?|svaret?\s+er|total(?:t|en)?|i\s+alt|conclusion|summary|result|in\s+total|the\s+answer/i.test(tail);
-	if (!hasConclusion && t.length > 1500 && looksTruncatedAnswer(t)) {
-		return true;
-	}
-
-	return false;
+	return !hasConclusion && t.length > 1500 && looksTruncatedAnswer(t);
 }
 
 function looksTruncatedAnswer(text: string): boolean {
@@ -2596,7 +2647,7 @@ async function extractTextFromChatResponse(response: unknown, onDebugLog?: Debug
 	}
 
 	// Check if it's an object with a text property
-	if (typeof response === 'object' && response !== null) {
+	if (typeof response === 'object') {
 		const obj = response as Record<string, any>;
 
 		// Log detailed object info for debugging

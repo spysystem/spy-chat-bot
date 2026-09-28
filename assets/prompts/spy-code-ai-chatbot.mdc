@@ -1,0 +1,49 @@
+---
+description: "Spy Code AI MCP guidance for the desktop chatbot."
+alwaysApply: false
+priority: 8
+tags: ["mcp", "spy-code-ai", "code-search", "verification"]
+---
+
+# SPY Code AI MCP
+
+The `spy-code-ai` MCP server searches indexed SPY code across PHP, TypeScript, SQL, views, and config. Use it when the user asks how SPY code works, where logic lives, or which symbols/files are likely relevant.
+
+## Purpose In This Chatbot
+
+- Use `spy_search_context` when you need a broad overview of a SPY feature area.
+- Use `spy_search_code` when you need a targeted lookup for a class, method, route, entity field, or other known symbol.
+- Treat this MCP as a code lookup and discovery tool for grounded answers in chat.
+- Do NOT use this MCP for scoping, spec generation, or project planning in this app.
+
+## Critical Verification Rule
+
+MCP results are indexed matches, not verified source of truth.
+
+- When direct repo tools are available, verify important claims with `search_code_context`, `read_file`, or `read_file_section`.
+- If direct file verification is not available, be explicit that the answer is based on indexed MCP results.
+- Never present an indexed hit as a fully verified implementation detail unless you confirmed it.
+
+## Tool Guidance
+
+### `spy_search_context`
+
+Use this first when the user asks about a feature area, flow, or business rule and you do not yet know the exact symbol names.
+
+- Input: natural language query
+- Output: grouped implementation context across data, logic, API, UI, and relationships
+
+### `spy_search_code`
+
+Use this when you already know roughly what you need to find.
+
+- Input: search query
+- Optional filters: `kind`, `limit`, `match_mode`
+- Best for: known controllers, methods, entities, routes, or exact class names
+
+## Operating Rules
+
+- Prefer concise, specific query text.
+- Use MCP silently; do not describe your search process to the user.
+- Combine MCP with the app's existing local code tools when you need stronger verification.
+- If MCP is unavailable, continue with the app's other code search tools and answer in degraded mode.

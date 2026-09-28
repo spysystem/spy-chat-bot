@@ -43,6 +43,7 @@ function AppWithStreams(props: { theme: string; toggleTheme: () => void; initial
 	const [chats, setChats]                          = useState<Chat[]>([]);
 	const [currentChatId, setCurrentChatId]          = useState<string | null>(null);
 	const [chatToDelete, setChatToDelete]            = useState<string | null>(null);
+	const [showClearAllModal, setShowClearAllModal]  = useState(false);
 
 	// Update modal state
 	const [showUpdateModal, setShowUpdateModal]      = useState(false);
@@ -149,6 +150,14 @@ function AppWithStreams(props: { theme: string; toggleTheme: () => void; initial
 		setChatToDelete(null);
 	}
 
+	function openClearAllModal(): void {
+		setShowClearAllModal(true);
+	}
+
+	function closeClearAllModal(): void {
+		setShowClearAllModal(false);
+	}
+
 	async function confirmDelete(): Promise<void> {
 		if (!chatToDelete) {
 			return;
@@ -173,6 +182,14 @@ function AppWithStreams(props: { theme: string; toggleTheme: () => void; initial
 
 		// Close modal and force window focus after deletion
 		setChatToDelete(null);
+		await window.electronAPI.focusWindow();
+	}
+
+	async function confirmClearAllChats(): Promise<void> {
+		await window.electronAPI.clearAllChats();
+		setChats([]);
+		setCurrentChatId(null);
+		setShowClearAllModal(false);
 		await window.electronAPI.focusWindow();
 	}
 
@@ -217,6 +234,11 @@ function AppWithStreams(props: { theme: string; toggleTheme: () => void; initial
 					<button className="new-chat-btn" onClick={createNewChat}>
 						+ New Chat
 					</button>
+					{chats.length > 0 && (
+						<button className="clear-chats-btn" onClick={openClearAllModal}>
+							Clear All Chats
+						</button>
+					)}
 
 					<div className="chat-list">
 						<div className="chat-list-header">Chats</div>
@@ -304,6 +326,16 @@ function AppWithStreams(props: { theme: string; toggleTheme: () => void; initial
 				message="Are you sure you want to delete this chat? This action cannot be undone."
 				onConfirm={confirmDelete}
 				onCancel={closeDeleteModal}
+				confirmText="Delete"
+			/>
+
+			<ConfirmModal
+				isOpen={showClearAllModal}
+				title="Clear All Chats"
+				message="Are you sure you want to clear all chats? This action cannot be undone."
+				onConfirm={confirmClearAllChats}
+				onCancel={closeClearAllModal}
+				confirmText="Clear All"
 			/>
 
 			<UpdateModal

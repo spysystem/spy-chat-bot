@@ -106,6 +106,25 @@ body {
 	transform: translateY(0);
 }
 
+.clear-chats-btn {
+	width: 100%;
+	padding: 10px 14px;
+	background: var(--bg-tertiary);
+	color: var(--danger-color);
+	border: 1px solid var(--border-color);
+	border-radius: 10px;
+	cursor: pointer;
+	font-size: 13px;
+	font-weight: 600;
+	margin-bottom: 20px;
+	transition: all 0.2s ease;
+}
+
+.clear-chats-btn:hover {
+	background: var(--bg-hover);
+	border-color: var(--danger-color);
+}
+
 .chat-list {
 	flex: 1;
 	overflow-y: auto;

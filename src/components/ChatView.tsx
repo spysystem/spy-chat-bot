@@ -2,9 +2,10 @@ import {useState, useEffect, useMemo, useRef, JSX} from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
-import type {AttachmentMeta, Message, DatabaseConfig, SystemDirectorySystem, ChatUpdate} from '../types';
+import type {AiQualityProfile, AttachmentMeta, Message, DatabaseConfig, SystemDirectorySystem, ChatUpdate} from '../types';
 import type {Chat} from '../types';
-import {buildStreamAssistantMessage, useAiStreams} from '../ai/AiStreamContext';
+import {useAiStreams} from '../ai/AiStreamContext';
+import {buildStreamAssistantMessage} from '../ai/stream-message';
 import './ChatView.css';
 import 'highlight.js/styles/github-dark.css';
 
@@ -23,6 +24,8 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 	const [attachmentPreviewMap, setAttachmentPreviewMap] = useState<Map<string, string>>(new Map()); // storedPath -> dataUrl
 	const [attachmentError, setAttachmentError]           = useState<string>('');
 	const [hasApiKey, setHasApiKey]                       = useState(false);
+	const [selectedModel, setSelectedModel]               = useState<'claude' | 'openai'>('claude');
+	const [aiQualityProfile, setAiQualityProfile]         = useState<AiQualityProfile>('maximum_accuracy');
 	const [userName, setUserName]                         = useState<string>('You');
 	const [isInitialized, setIsInitialized]               = useState(false);
 	const [expandedMessageMap, setExpandedMessageMap]     = useState<Map<number, boolean>>(new Map());
@@ -30,15 +33,14 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 	const [githubBranch, setGithubBranch]                 = useState<string>('');
 
 	// System selector state (per chat)
-	const [systems, setSystems]                             = useState<SystemDirectorySystem[]>([]);
-	const [systemsLoading, setSystemsLoading]               = useState<boolean>(false);
-	const [systemsError, setSystemsError]                   = useState<string>('');
-	const [systemSearch, setSystemSearch]                   = useState<string>('');
-	const [showSystemResults, setShowSystemResults]         = useState<boolean>(false);
-	const [filterActive, setFilterActive]                   = useState<boolean>(true);
-	const [filterRestore, setFilterRestore]                 = useState<boolean>(false);
-	const [filterDev, setFilterDev]                         = useState<boolean>(false);
-	const [clarificationFreeText, setClarificationFreeText] = useState('');
+	const [systems, setSystems]                     = useState<SystemDirectorySystem[]>([]);
+	const [systemsLoading, setSystemsLoading]       = useState<boolean>(false);
+	const [systemsError, setSystemsError]           = useState<string>('');
+	const [systemSearch, setSystemSearch]           = useState<string>('');
+	const [showSystemResults, setShowSystemResults] = useState<boolean>(false);
+	const [filterActive, setFilterActive]           = useState<boolean>(true);
+	const [filterRestore, setFilterRestore]         = useState<boolean>(false);
+	const [filterDev, setFilterDev]                 = useState<boolean>(false);
 
 	const systemSelectorReference = useRef<HTMLDivElement>(null);
 	const messagesEndReference    = useRef<HTMLDivElement>(null);
@@ -56,12 +58,6 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 	const clarificationRequest    = getClarificationRequest(chatId);
 	const isStreamRunning         = !!streamState && (streamState.status === 'running' || streamState.status === 'stopping');
 	const progressStatus          = streamState?.progressStatus || '';
-
-	useEffect(() => {
-		if (!clarificationRequest) {
-			setClarificationFreeText('');
-		}
-	}, [clarificationRequest]);
 
 	const DEV_SQL_HOST = 'dev2.spysystem.dk';
 
@@ -95,7 +91,8 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 		async function initialize() {
 			setIsInitialized(false);
 			await loadConnection();
-			await checkApiKey();
+			const model = await loadAiSettings();
+			await checkApiKey(model);
 			await loadUserName();
 			await loadGithubBranch();
 			// Force window focus
@@ -173,7 +170,8 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 		const nowRunning                 = isStreamRunning;
 		previousStreamRunningRef.current = nowRunning;
 		if (wasRunning && !nowRunning) {
-			// Stream finished (or errored/stopped) - refresh messages from disk.
+			// Reload persisted messages when stream completes to ensure final assistant
+			// response is visible immediately in this view.
 			void (async () => {
 				const chat = await window.electronAPI.getChat(chatId);
 				setSelectedChat(chat);
@@ -237,8 +235,19 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 		};
 	}, [filterDev, chatId]);
 
+	const scrollTimerReference = useRef<ReturnType<typeof setTimeout> | null>(null);
 	useEffect(() => {
-		messagesEndReference.current?.scrollIntoView({behavior: 'smooth'});
+		if (scrollTimerReference.current) {
+			clearTimeout(scrollTimerReference.current);
+		}
+		scrollTimerReference.current = setTimeout(() => {
+			messagesEndReference.current?.scrollIntoView({behavior: 'smooth'});
+		}, 80);
+		return () => {
+			if (scrollTimerReference.current) {
+				clearTimeout(scrollTimerReference.current);
+			}
+		};
 	}, [messages, streamState?.partialText]);
 
 	useEffect(() => {
@@ -288,8 +297,21 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 		return conn;
 	}
 
-	async function checkApiKey(): Promise<void> {
-		const apiKey = await window.electronAPI.getApiKey();
+	async function loadAiSettings(): Promise<'claude' | 'openai'> {
+		const [model, profile] = await Promise.all([
+			window.electronAPI.getSelectedModel(),
+			window.electronAPI.getAiQualityProfile(),
+		]);
+		setSelectedModel(model);
+		setAiQualityProfile(profile);
+		return model;
+	}
+
+	async function checkApiKey(modelOverride?: 'claude' | 'openai'): Promise<void> {
+		const activeModel = modelOverride || selectedModel;
+		const apiKey      = activeModel === 'openai'
+			? await window.electronAPI.getOpenAiApiKey()
+			: await window.electronAPI.getApiKey();
 		setHasApiKey(!!apiKey);
 	}
 
@@ -326,10 +348,26 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 		onChatUpdate();
 	}
 
+	function normalizeBranchLikeValue(value: string): string {
+		return value
+			.trim()
+			.replace(/^refs\/heads\//i, '')
+			.replace(/-/g, '_');
+	}
+
 	function releaseToBranch(release: unknown): string | null {
-		const value = String(release ?? '').trim();
+		const rawValue = String(release ?? '').trim();
+		if (!rawValue) {
+			return null;
+		}
+
+		const value = normalizeBranchLikeValue(rawValue);
 		if (!value) {
 			return null;
+		}
+
+		if (/^\d{4}_\d{2}_\d{2}$/.test(value) || /^\d{4}_\d{2}$/.test(value)) {
+			return value;
 		}
 
 		// 202512.1 -> 2025_12_10
@@ -353,7 +391,25 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 			return `${year}_${month}`;
 		}
 
+		// 20251210 -> 2025_12_10
+		const compactFullMatch = value.match(/^(\d{4})(\d{2})(\d{2})$/);
+		if (compactFullMatch) {
+			const [, year, month, patch] = compactFullMatch;
+			return `${year}_${month}_${patch}`;
+		}
+
 		return null;
+	}
+
+	function resolveSystemBranch(system: SystemDirectorySystem): string {
+		const candidates = [system.release, system.targetRelease, system.nextRelease];
+		for (const candidate of candidates) {
+			const branch = releaseToBranch(candidate);
+			if (branch) {
+				return branch;
+			}
+		}
+		return '';
 	}
 
 	const filteredSystems = useMemo(() => {
@@ -382,7 +438,7 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 	}, [filterActive, filterRestore, filterDev, systemSearch, systems]);
 
 	async function selectSystem(system: SystemDirectorySystem): Promise<void> {
-		const branch = releaseToBranch(system.release) ?? undefined;
+		const branch = resolveSystemBranch(system);
 		setSystemSearch(system.name);
 		setDatabaseName(system.databaseName);
 		setShowSystemResults(false);
@@ -416,9 +472,10 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 		setShowSystemResults(false);
 		if (next) {
 			await saveChatUpdate({
-				isDevMode: true,
-				dbHost   : DEV_SQL_HOST,
-				// Keep branch as-is (dev DB doesn't imply a code branch)
+				isDevMode : true,
+				dbHost    : DEV_SQL_HOST,
+				branch    : '',
+				// Clear branch because dev DB selection does not guarantee a matching code branch.
 				systemKey : '',
 				systemName: 'Dev',
 				release   : '',
@@ -493,6 +550,22 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 			return;
 		}
 
+		if (clarificationRequest) {
+			const messageText                   = inputValue;
+			const clarificationMessage: Message = {
+				role       : 'user',
+				content    : messageText,
+				timestamp  : new Date(),
+				attachments: pendingAttachments.length > 0 ? pendingAttachments : undefined,
+			};
+			setMessages((prev) => [...prev, clarificationMessage]);
+			setInputValue('');
+			clearDraft(chatId);
+			setPendingAttachments([]);
+			await submitClarification(chatId, messageText, pendingAttachments);
+			return;
+		}
+
 		const messageText          = inputValue;
 		const userMessage: Message = {
 			role       : 'user',
@@ -510,7 +583,7 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 
 		try {
 			// Build conversation history with technical detail (detailedContent)
-			// so Claude remembers which tables/schemas it discovered earlier.
+			// so the assistant remembers which tables/schemas it discovered earlier.
 			// Send up to 20 messages but truncate very large assistant answers.
 			const MAX_HISTORY_MESSAGES   = 20;
 			const MAX_ASSISTANT_CHAR_LEN = 2000;
@@ -539,9 +612,11 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 			const effectiveDbHost       = selectedChat?.dbHost && selectedChat.dbHost.trim() !== ''
 				? selectedChat.dbHost.trim()
 				: (filterDev ? DEV_SQL_HOST : undefined);
-			const effectiveGithubBranch = selectedChat?.branch && selectedChat.branch.trim() !== ''
-				? selectedChat.branch.trim()
-				: undefined;
+			const hasPinnedSystemBranch = !!(selectedChat?.branch && selectedChat.branch.trim() !== '');
+			const hasSystemContext      = !!(selectedChat?.systemKey || selectedChat?.systemName || selectedChat?.release);
+			const effectiveGithubBranch = hasPinnedSystemBranch
+				? selectedChat!.branch!.trim()
+				: (!hasSystemContext && githubBranch.trim() !== '' ? githubBranch.trim() : undefined);
 
 			// If connection + database are provided, enable database tools.
 			const databaseIds = connection && effectiveDatabaseName ? [connection.id] : [];
@@ -608,11 +683,12 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 	}, [messages, isStreamRunning, streamState?.hasStreamedContent, streamState?.partialText, streamState?.status, streamState?.error]);
 
 	if (!hasApiKey) {
+		const providerLabel = selectedModel === 'openai' ? 'OpenAI' : 'Claude';
 		return (
 			<div className="chat-view">
 				<div className="setup-required">
 					<h2>Setup Required</h2>
-					<p>Please configure your Claude API key in Settings to start chatting.</p>
+					<p>Please configure your {providerLabel} API key in Settings to start chatting.</p>
 				</div>
 			</div>
 		);
@@ -634,10 +710,18 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 				<div className="chat-title">{selectedChat?.title || 'New Chat'}</div>
 			</div>
 			<div className="badge-container">
-				{(selectedChat?.branch || githubBranch) && (
+				<div className="provider-badge">
+					<span className="provider-name">{selectedModel === 'openai' ? 'ChatGPT' : 'Claude'}</span>
+				</div>
+				{selectedModel === 'openai' && (
+					<div className="quality-badge">
+						<span className="quality-name">{aiQualityProfile === 'maximum_accuracy' ? 'Maximum Accuracy' : 'Balanced'}</span>
+					</div>
+				)}
+				{selectedChat?.branch && selectedChat.branch.trim() !== '' && (
 					<div className="branch-badge">
 						<span className="branch-icon">🔀</span>
-						<span className="branch-name">{selectedChat?.branch || githubBranch}</span>
+						<span className="branch-name">{selectedChat.branch}</span>
 					</div>
 				)}
 				{(selectedChat?.dbHost || connection?.host) && (
@@ -783,9 +867,10 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 				)}
 
 				{displayedMessages.map((message, index) => {
-					const hasDetailed = message.role === 'assistant' && !!message.detailedContent && message.detailedContent.trim() !== '' && message.detailedContent.trim() !== message.content.trim();
-					const isExpanded  = expandedMessageMap.get(index) || false;
-					const shownText   = (hasDetailed && isExpanded) ? (message.detailedContent as string) : message.content;
+					const detailedText = message.role === 'assistant' ? (message.detailedContent || '').trim() : '';
+					const hasDetailed  = detailedText !== '';
+					const isExpanded   = expandedMessageMap.get(index) || false;
+					const shownText    = (hasDetailed && isExpanded) ? detailedText : message.content;
 
 					return (
 						<div key={index} className={`message ${message.role}`}>
@@ -891,7 +976,6 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 									key={opt}
 									className="clarification-option"
 									onClick={() => {
-										setClarificationFreeText('');
 										submitClarification(chatId, opt);
 									}}
 								>
@@ -900,39 +984,9 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 							))}
 						</div>
 					)}
-					{(clarificationRequest.allowFreeText || (clarificationRequest.options?.length ?? 0) === 0) && (
-						<div className="clarification-free-text">
-							<input
-								type="text"
-								value={clarificationFreeText}
-								onChange={(e) => setClarificationFreeText(e.target.value)}
-								onKeyDown={(e) => {
-									if (e.key === 'Enter') {
-										e.preventDefault();
-										const text = clarificationFreeText.trim();
-										if (text) {
-											setClarificationFreeText('');
-											submitClarification(chatId, text);
-										}
-									}
-								}}
-								placeholder="Type your answer..."
-								autoFocus
-							/>
-							<button
-								onClick={() => {
-									const text = clarificationFreeText.trim();
-									if (text) {
-										setClarificationFreeText('');
-										submitClarification(chatId, text);
-									}
-								}}
-								disabled={!clarificationFreeText.trim()}
-							>
-								Send
-							</button>
-						</div>
-					)}
+					<div className="clarification-hint">
+						Reply in the regular chat box below, or pick an option.
+					</div>
 				</div>
 			)}
 
@@ -981,12 +1035,12 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 						}
 					}}
 					placeholder="Ask away!"
-					disabled={isBusy || !!clarificationRequest}
+					disabled={isBusy}
 					autoFocus
 				/>
 				<button
 					onClick={() => fileInputReference.current?.click()}
-					disabled={isBusy || !!clarificationRequest}
+					disabled={isBusy}
 					className="attach-button"
 				>
 					Attach
@@ -996,7 +1050,7 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 						Stop
 					</button>
 				)}
-				<button onClick={handleSend} disabled={isBusy || !!clarificationRequest || (!inputValue.trim() && pendingAttachments.length === 0)}>
+				<button onClick={handleSend} disabled={isBusy || (!inputValue.trim() && pendingAttachments.length === 0)}>
 					Send
 				</button>
 			</div>

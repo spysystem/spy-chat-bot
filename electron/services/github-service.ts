@@ -4,6 +4,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import {promisify} from 'util';
 import {SecureStorageService} from './secure-storage-service';
+import {LATENCY_FLAGS} from './latency-flags';
 
 // Ripgrep binary path from @vscode/ripgrep package.
 // In a packaged Electron app the binary lives inside app.asar, which the OS
@@ -42,11 +43,17 @@ export interface GitHubConfig {
 export class GitHubService {
 	private readonly configPath: string;
 	private readonly secureStorage: SecureStorageService;
-	private config: GitHubConfig | null              = null;
-	private lastLocalSyncIso: string | null          = null;
-	private localRepoUrl: string | null              = null;
-	private worktreeLastSyncMs: Map<string, number>  = new Map<string, number>();
-	private readonly worktreeFetchIntervalMs: number = 20 * 60 * 1000;
+	private config: GitHubConfig | null                                                   = null;
+	private lastLocalSyncIso: string | null                                               = null;
+	private localRepoUrl: string | null                                                   = null;
+	private worktreeLastSyncMs: Map<string, number>                                       = new Map<string, number>();
+	private readonly worktreeFetchIntervalMs: number                                      = 20 * 60 * 1000;
+	private readonly searchCache: Map<string, {
+		results: Array<{ path: string; matches: string[] }>;
+		createdAtMs: number;
+	}>                                                                                    = new Map();
+	private readonly searchCacheTtlMs: number                                             = 10 * 60 * 1000;
+	private lastSearchMeta: { cacheHit: boolean; key: string; durationMs: number } | null = null;
 	private lastLocalSearchMeta: null | {
 		branch: string;
 		worktreePath: string;
@@ -54,7 +61,7 @@ export class GitHubService {
 		mode: 'all' | 'any';
 		pathSpecs: string[];
 		durationMs: number;
-	}                                                = null;
+	}                                                                                     = null;
 
 
 	constructor(secureStorage: SecureStorageService) {
@@ -111,6 +118,10 @@ export class GitHubService {
 
 	getLocalRepoRoot(): string {
 		return path.join(app.getPath('userData'), 'repos', 'spy');
+	}
+
+	getLastSearchMeta(): { cacheHit: boolean; key: string; durationMs: number } | null {
+		return this.lastSearchMeta;
 	}
 
 	getWorktreesRoot(): string {
@@ -377,7 +388,7 @@ export class GitHubService {
 		branch: string,
 		url: string,
 		options?: { fetch?: boolean; fetchIntervalMs?: number },
-	): Promise<{ worktreePath: string }> {
+	): Promise<{ worktreePath: string; existed: boolean; fetched: boolean; fetchReason: string }> {
 		const fetch           = options?.fetch ?? false;
 		const fetchIntervalMs = options?.fetchIntervalMs ?? this.worktreeFetchIntervalMs;
 		await this.ensureLocalRepo(url, {fetch});
@@ -386,6 +397,9 @@ export class GitHubService {
 
 		const safeBranch   = branch.replace(/[^a-zA-Z0-9._-]/g, '_');
 		const worktreePath = path.join(worktreesRoot, safeBranch);
+		const existed      = await this.pathExists(worktreePath);
+		let fetched        = false;
+		let fetchReason    = fetch ? 'repo_refresh_requested' : 'none';
 
 		// Always prune stale worktrees first to avoid "already used by worktree" errors
 		// This cleans up entries where the directory was deleted but Git still tracks them
@@ -395,7 +409,7 @@ export class GitHubService {
 			// Ignore prune errors - not critical
 		}
 
-		if (!(await this.pathExists(worktreePath))) {
+		if (!existed) {
 			// Check if branch exists in remote refs
 			const {exitCode} = await this.runGitWithExitCodes(
 				['-C', this.getLocalRepoRoot(), 'show-ref', '--verify', '--quiet', `refs/remotes/origin/${branch}`],
@@ -407,11 +421,14 @@ export class GitHubService {
 				// Branch not found locally - fetch ALL remote refs first
 				// This is needed because initial clone may not have fetched all branches
 				console.log(`[GitHubService] Branch '${branch}' not found locally, fetching all remote refs...`);
+				fetched     = true;
+				fetchReason = 'missing_remote_ref';
 				try {
 					await this.runGit(['-C', this.getLocalRepoRoot(), 'fetch', '--all', '--prune'], this.getLocalRepoRoot());
 				} catch (fetchAllError) {
 					// If fetch --all fails, try fetching the specific branch
 					console.log(`[GitHubService] Fetch --all failed, trying specific branch: ${branch}`);
+					fetchReason = 'missing_remote_ref_specific_fetch';
 					await this.runGit(['-C', this.getLocalRepoRoot(), 'fetch', 'origin', branch], this.getLocalRepoRoot());
 				}
 
@@ -465,11 +482,15 @@ export class GitHubService {
 				await this.runGit(['-C', worktreePath, 'checkout', branch], worktreePath);
 				await this.runGit(['-C', worktreePath, 'reset', '--hard', `origin/${branch}`], worktreePath);
 				this.worktreeLastSyncMs.set(branch, Date.now());
+				fetched     = true;
+				fetchReason = 'existing_worktree_refresh';
+			} else if (fetch) {
+				fetchReason = 'existing_worktree_recent';
 			}
 		}
 
 		this.lastLocalSyncIso = new Date().toISOString();
-		return {worktreePath};
+		return {worktreePath, existed, fetched, fetchReason};
 	}
 
 	private resolveWorktreeFile(worktreePath: string, filePath: string): string {
@@ -592,9 +613,13 @@ export class GitHubService {
 		args: string[],
 		cwd: string,
 	): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-		const rg = await getRipgrepPath();
-		return await new Promise((resolve, reject) => {
-			const child = spawn(rg, args, {cwd, windowsHide: true});
+		const rg      = await getRipgrepPath();
+		const runOnce = async (rgArgs: string[]): Promise<{
+			stdout: string;
+			stderr: string;
+			exitCode: number
+		}> => await new Promise((resolve, reject) => {
+			const child = spawn(rg, rgArgs, {cwd, windowsHide: true});
 			let stdout  = '';
 			let stderr  = '';
 
@@ -625,13 +650,25 @@ export class GitHubService {
 				}
 			});
 		});
+
+		try {
+			return await runOnce(args);
+		} catch (error) {
+			const message = String(error ?? '');
+			// Some ripgrep versions do not support --max-total-count.
+			if (message.includes('--max-total-count') && args.includes('--max-total-count=200')) {
+				const fallbackArgs = args.filter((arg) => arg !== '--max-total-count=200');
+				return await runOnce(fallbackArgs);
+			}
+			throw error;
+		}
 	}
 
 	async searchCodeLocal(query: string, branch: string, url: string): Promise<Array<{ path: string; matches: string[] }>> {
 		const startTime = Date.now();
 
-		// IMPORTANT: Don't fetch on every search - only ensure worktree exists
-		const {worktreePath}            = await this.ensureWorktree(branch, url, {fetch: false});
+		// Refresh through ensureWorktree with TTL-based fetches so branch contents stay current.
+		const {worktreePath}            = await this.ensureWorktree(branch, url, {fetch: true});
 		const {cleanedQuery, pathSpecs} = this.parseSearchQuery(query);
 		const tokens                    = this.extractSearchTokens(cleanedQuery, 5);
 		const inferredPathSpecs         = pathSpecs.length === 0 ? this.inferPathSpecs(tokens) : [];
@@ -644,19 +681,23 @@ export class GitHubService {
 				'--line-number',           // Show line numbers
 				'--no-heading',            // file:line:match format
 				'--color=never',           // No ANSI colors
-				'--ignore-case',           // Case insensitive
+				'--smart-case',            // Case-insensitive unless pattern has uppercase (faster for PascalCase class names)
 				'--max-count=5',           // Max matches per file
-				'--max-filesize=1M',       // Skip files >1MB
+				'--max-total-count=200',   // Stop after 200 total matches across all files (big speedup on large repos)
+				'--max-filesize=512K',     // Skip files >512KB (was 1M)
 				'--type=php',              // Search PHP files
 				'--type=ts',               // Search TypeScript files
 				'--type=js',               // Search JavaScript files
 				'--type=json',             // Search JSON files
-				'--type=css',              // Search CSS files
 				'--glob=!node_modules',    // Exclude node_modules
 				'--glob=!vendor',          // Exclude vendor
+				'--glob=!dist',            // Exclude compiled output
 				'--glob=!*.min.js',        // Exclude minified JS
 				'--glob=!*.min.css',       // Exclude minified CSS
 				'--glob=!*.map',           // Exclude source maps
+				'--glob=!*.d.ts',          // Exclude TypeScript declaration files
+				'--glob=!*.lock',          // Exclude lock files (package-lock, composer.lock)
+				'--glob=!*.sql',           // Exclude SQL dumps
 			];
 
 			// Build search pattern
@@ -684,14 +725,14 @@ export class GitHubService {
 		// Strategy: Narrow -> Wide search using ripgrep
 		// 1) Search with path hints first (if any)
 		if (allPathHints.length > 0) {
-			// Filter to paths that exist
-			const existingPaths: string[] = [];
-			for (const hint of allPathHints) {
-				const fullPath = path.join(worktreePath, hint);
-				if (await this.pathExists(fullPath)) {
-					existingPaths.push(hint);
-				}
-			}
+			// Filter to paths that exist - parallel checks instead of sequential
+			const existenceChecks = await Promise.all(
+				allPathHints.map(async (hint) => ({
+					hint,
+					exists: await this.pathExists(path.join(worktreePath, hint)),
+				})),
+			);
+			const existingPaths   = existenceChecks.filter((r) => r.exists).map((r) => r.hint);
 
 			if (existingPaths.length > 0) {
 				this.lastLocalSearchMeta = {
@@ -811,8 +852,8 @@ export class GitHubService {
 	}
 
 	async readFileLocal(filePath: string, branch: string, url: string): Promise<string> {
-		// Don't fetch on every file read - worktree is kept updated by background sync
-		const {worktreePath} = await this.ensureWorktree(branch, url, {fetch: false});
+		// Refresh through ensureWorktree with TTL-based fetches so branch contents stay current.
+		const {worktreePath} = await this.ensureWorktree(branch, url, {fetch: true});
 		const fullPath       = this.resolveWorktreeFile(worktreePath, filePath);
 		return await fs.readFile(fullPath, 'utf-8');
 	}
@@ -829,8 +870,8 @@ export class GitHubService {
 	}
 
 	async listFilesLocal(directoryPath: string, branch: string, url: string): Promise<Array<{ path: string; type: 'file' | 'dir' }>> {
-		// Don't fetch on every list - worktree is kept updated by background sync
-		const {worktreePath} = await this.ensureWorktree(branch, url, {fetch: false});
+		// Refresh through ensureWorktree with TTL-based fetches so branch contents stay current.
+		const {worktreePath} = await this.ensureWorktree(branch, url, {fetch: true});
 		const fullPath       = this.resolveWorktreeFile(worktreePath, directoryPath || '.');
 		if (!(await this.pathExists(fullPath))) {
 			return [];
@@ -843,8 +884,8 @@ export class GitHubService {
 	}
 
 	async getTreeLocal(branch: string, url: string): Promise<Array<{ path: string; type: string }>> {
-		// Don't fetch on every tree - worktree is kept updated by background sync
-		const {worktreePath} = await this.ensureWorktree(branch, url, {fetch: false});
+		// Refresh through ensureWorktree with TTL-based fetches so branch contents stay current.
+		const {worktreePath} = await this.ensureWorktree(branch, url, {fetch: true});
 		const {stdout}       = await this.runGitWithExitCodes(
 			['-C', worktreePath, 'ls-tree', '-r', '--name-only', 'HEAD'],
 			worktreePath,
@@ -969,11 +1010,25 @@ export class GitHubService {
 	}
 
 	async searchCode(query: string, branchOverride?: string): Promise<Array<{ path: string; matches: string[] }>> {
+		const startMs      = Date.now();
 		const localRepoUrl = this.localRepoUrl;
 		const branch       = this.getBranchOrDefault(branchOverride);
+		const cacheKey     = `${branch}::${query.trim().toLowerCase()}`;
+		if (LATENCY_FLAGS.enableRetrievalCaches) {
+			const cached = this.searchCache.get(cacheKey);
+			if (cached && Date.now() - cached.createdAtMs < this.searchCacheTtlMs) {
+				this.lastSearchMeta = {cacheHit: true, key: cacheKey, durationMs: Date.now() - startMs};
+				return cached.results;
+			}
+		}
 		if (localRepoUrl) {
 			try {
-				return await this.searchCodeLocal(query, branch, localRepoUrl);
+				const results = await this.searchCodeLocal(query, branch, localRepoUrl);
+				if (LATENCY_FLAGS.enableRetrievalCaches) {
+					this.searchCache.set(cacheKey, {results, createdAtMs: Date.now()});
+				}
+				this.lastSearchMeta = {cacheHit: false, key: cacheKey, durationMs: Date.now() - startMs};
+				return results;
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				throw new Error(`Local repository search failed: ${message}`);
@@ -996,10 +1051,15 @@ export class GitHubService {
 				},
 			});
 
-			return data.items.map((item: any) => ({
+			const results = data.items.map((item: any) => ({
 				path   : item.path,
 				matches: item.text_matches?.map((m: any) => m.fragment || '') || [],
 			}));
+			if (LATENCY_FLAGS.enableRetrievalCaches) {
+				this.searchCache.set(cacheKey, {results, createdAtMs: Date.now()});
+			}
+			this.lastSearchMeta = {cacheHit: false, key: cacheKey, durationMs: Date.now() - startMs};
+			return results;
 		} catch (error) {
 			console.error('[GitHubService] Search error:', error);
 			throw error;

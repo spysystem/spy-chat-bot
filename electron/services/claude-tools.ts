@@ -5,6 +5,9 @@ import {z} from 'zod';
 import type {DatabaseService} from './database-service';
 import type {GitHubService} from './github-service';
 import type {SchemaIndexService} from './schema-index-service';
+import type {SpyCodeAiMcpService} from './spy-code-ai-mcp-service';
+import {addAnswerEvidence} from './shared/answer-quality';
+import type {AnswerEvidenceItem} from './shared/answer-quality';
 
 export type DebugLogFn = (
 	type: 'query' | 'tool' | 'api' | 'error' | 'info',
@@ -17,6 +20,7 @@ export interface ClaudeToolOptions {
 	databaseService: DatabaseService;
 	githubService: GitHubService;
 	schemaIndexService: SchemaIndexService;
+	spyCodeAiMcpService: SpyCodeAiMcpService;
 	databaseIds: string[];
 	databaseName?: string;
 	dbHostOverride?: string;
@@ -24,6 +28,13 @@ export interface ClaudeToolOptions {
 	onProgress?: (status: string) => void;
 	onDebugLog?: DebugLogFn;
 	queryResults: Array<{ query: string; data: any[] }>;
+	evidenceItems?: AnswerEvidenceItem[];
+	toolUsageStats?: {
+		codeSearches: number;
+		contextSearches: number;
+		fileReads: number;
+		fileSectionReads: number;
+	};
 }
 
 export interface ClaudeToolsResult {
@@ -33,8 +44,30 @@ export interface ClaudeToolsResult {
 }
 
 type DbConfig = { id: string; name: string; host: string; database?: string };
+const LOCAL_CODE_SEARCH_SOFT_LIMIT  = 40;
+const REMOTE_CODE_SEARCH_SOFT_LIMIT = 15;
 
-function truncateLargeToolResult(
+export async function runWithConcurrency<T>(
+	items: T[],
+	concurrency: number,
+	worker: (item: T, index: number) => Promise<void>,
+): Promise<void> {
+	if (items.length === 0) {
+		return;
+	}
+	const limit   = Math.max(1, concurrency);
+	let cursor    = 0;
+	const runners = Array.from({length: Math.min(limit, items.length)}, async () => {
+		while (cursor < items.length) {
+			const index = cursor++;
+			// eslint-disable-next-line no-await-in-loop
+			await worker(items[index], index);
+		}
+	});
+	await Promise.all(runners);
+}
+
+export function truncateLargeToolResult(
 	result: unknown,
 	maxRows: number  = 100,
 	maxLines: number = 500,
@@ -110,6 +143,41 @@ This truncation prevents token limit errors. Use targeted searches instead of re
 	}
 
 	return {truncated: false, data: result};
+}
+
+export function formatQueryDebugPreview(
+	result: unknown,
+	maxPreviewRows: number = 3,
+): string {
+	const queryResult = result as { rows?: any[]; rowCount?: number; [key: string]: any };
+	const rows        = Array.isArray(queryResult.rows) ? queryResult.rows : [];
+	const rowCount    = typeof queryResult.rowCount === 'number' ? queryResult.rowCount : rows.length;
+	if (rows.length === 0) {
+		return `Rows returned: ${rowCount}\nPreview: (empty result set)`;
+	}
+
+	const firstRow = rows[0] && typeof rows[0] === 'object' ? rows[0] : null;
+	const columns  = firstRow ? Object.keys(firstRow) : [];
+	const preview  = rows.slice(0, Math.max(1, maxPreviewRows));
+
+	return [
+		`Rows returned: ${rowCount}`,
+		columns.length > 0 ? `Columns: ${columns.join(', ')}` : 'Columns: (unknown)',
+		'Preview:',
+		JSON.stringify(preview, null, 2),
+	].join('\n');
+}
+
+function getCodeSearchSoftLimit(hasLocalRepo: boolean): number {
+	return hasLocalRepo ? LOCAL_CODE_SEARCH_SOFT_LIMIT : REMOTE_CODE_SEARCH_SOFT_LIMIT;
+}
+
+function getCodeSearchSoftLimitMessage(codeSearchCallCount: number, softLimit: number, hasLocalRepo: boolean): string {
+	if (hasLocalRepo) {
+		return `Code search #${codeSearchCallCount} in this run (local soft limit ${softLimit}). Local ripgrep is usually fine, but prefer read_file/read_file_section once the target file is known.`;
+	}
+
+	return `Code search #${codeSearchCallCount} (over soft limit of ${softLimit}). Consider using read_file instead.`;
 }
 
 const sqlKeywordSet = new Set([
@@ -200,12 +268,13 @@ function suggestColumnsFromTable(
 	return suggestions;
 }
 
-async function preflightQueryAgainstSchemaIndex(
+export async function preflightQueryAgainstSchemaIndex(
 	schemaIndexService: SchemaIndexService,
 	configId: string,
 	sql: string,
+	options?: { branch?: string; fallbackBranches?: string[] },
 ): Promise<{ ok: boolean; error?: string; hints?: any }> {
-	const index = await schemaIndexService.loadIndex(configId);
+	const index = await schemaIndexService.loadIndex(configId, options);
 	if (!index) {
 		return {ok: true};
 	}
@@ -380,6 +449,28 @@ export async function createClaudeTools(options: ClaudeToolOptions): Promise<Cla
 		outputSchema: z.any(),
 	});
 
+	const spySearchCodeDef = toolDefinition({
+		name        : 'spy_search_code',
+		description : 'Search indexed SPY code by semantic or symbolic query. Use for broad SPY monolith lookup, then verify important claims with read_file or read_file_section when direct file access is available.',
+		inputSchema : z.object({
+			query     : z.string().describe('What to search for in indexed SPY code'),
+			kind      : z.enum(['entity_field', 'class', 'method', 'sql_query', 'route', 'relation', 'ts_file', 'view', 'api_endpoint']).optional(),
+			limit     : z.number().int().min(1).max(50).optional(),
+			match_mode: z.enum(['auto', 'semantic', 'symbolic', 'hybrid']).optional(),
+		}),
+		outputSchema: z.any(),
+	});
+
+	const spySearchContextDef = toolDefinition({
+		name        : 'spy_search_context',
+		description : 'Retrieve indexed SPY implementation context grouped by data, logic, API, UI, and relationships. Use for feature overviews and flow discovery.',
+		inputSchema : z.object({
+			query: z.string().describe('Natural language description of the feature area'),
+			limit: z.number().int().min(1).max(50).optional(),
+		}),
+		outputSchema: z.any(),
+	});
+
 	const readFileDef = toolDefinition({
 		name        : 'read_file',
 		description : 'Read an ENTIRE file from the repository. WARNING: For large files (1000+ lines), prefer read_file_section with specific line ranges instead. Use this only for small files or when you need the complete file.',
@@ -420,6 +511,7 @@ export async function createClaudeTools(options: ClaudeToolOptions): Promise<Cla
 			  databaseService,
 			  githubService,
 			  schemaIndexService,
+			  spyCodeAiMcpService,
 			  databaseIds,
 			  databaseName,
 			  dbHostOverride,
@@ -427,6 +519,8 @@ export async function createClaudeTools(options: ClaudeToolOptions): Promise<Cla
 			  onProgress,
 			  onDebugLog,
 			  queryResults,
+			  evidenceItems,
+			  toolUsageStats,
 		  } = options;
 
 	const configs          = await databaseService.getConfigs();
@@ -436,11 +530,21 @@ export async function createClaudeTools(options: ClaudeToolOptions): Promise<Cla
 		.map((c) => `${c.name} (id: ${c.id})`)
 		.join(', ');
 
-	const githubConfig = await githubService.getConfig();
-	const localRepoUrl = githubService.getLocalRepoUrl();
-	const hasGitHub    = !!githubConfig || !!localRepoUrl;
+	const githubConfig             = await githubService.getConfig();
+	const localRepoUrl             = githubService.getLocalRepoUrl();
+	const hasGitHub                = !!githubConfig || !!localRepoUrl;
+	const hasSpyCodeAi             = await spyCodeAiMcpService.isConfigured();
+	const schemaBranch             = githubBranchOverride?.trim() || githubConfig?.branch?.trim() || undefined;
+	const effectiveGitHubBranch    = githubBranchOverride?.trim() || githubConfig?.branch?.trim() || 'main';
+	const schemaIndexLookupOptions = {
+		branch          : schemaBranch,
+		fallbackBranches: githubConfig?.branch ? [githubConfig.branch] : [],
+	};
 	if (githubConfig) {
-		console.log('[ClaudeService] GitHub repo:', `${githubConfig.owner}/${githubConfig.repo}@${githubConfig.branch}`);
+		const branchSource = githubBranchOverride?.trim()
+			? `chat override; default: ${githubConfig.branch}`
+			: 'default config';
+		console.log('[ClaudeService] GitHub repo:', `${githubConfig.owner}/${githubConfig.repo}@${effectiveGitHubBranch} (${branchSource})`);
 	}
 	if (localRepoUrl) {
 		console.log('[ClaudeService] Local repo URL:', localRepoUrl);
@@ -474,11 +578,13 @@ export async function createClaudeTools(options: ClaudeToolOptions): Promise<Cla
 			onProgress?.(`Reading schema index: ${tableName}`);
 			onDebugLog?.('tool', 'Schema Index', `Reading cached schema for: ${tableName}`, 'Tool: get_table_schema_cached');
 
-			const index = await schemaIndexService.loadIndex(config.id);
+			const index = await schemaIndexService.loadIndex(config.id, schemaIndexLookupOptions);
 			if (!index) {
 				return {
 					exists : false,
-					message: 'No local schema index found. Generate it in Settings → Database Connection → Database Schema Index.',
+					message: schemaBranch
+						? `No local schema index found for branch "${schemaBranch}". Generate it in Settings → Database Connection → Database Schema Index, or rely on the fallback/global index.`
+						: 'No local schema index found. Generate it in Settings → Database Connection → Database Schema Index.',
 					databaseName,
 				};
 			}
@@ -493,6 +599,12 @@ export async function createClaudeTools(options: ClaudeToolOptions): Promise<Cla
 					message       : `Table not found in local schema index: ${tableName}`,
 				};
 			}
+			addAnswerEvidence(evidenceItems, {
+				kind    : 'schema_lookup',
+				label   : table.tableName,
+				detail  : `cached schema with ${table.columns.length} columns`,
+				verified: true,
+			});
 
 			const maxColumns = 200;
 			const columns    = table.columns.slice(0, maxColumns).map((c) => ({
@@ -508,6 +620,7 @@ export async function createClaudeTools(options: ClaudeToolOptions): Promise<Cla
 				found         : true,
 				databaseName,
 				generatedAtIso: index.generatedAtIso,
+				branch        : index.branch,
 				source        : index.source,
 				table         : {
 					tableName       : table.tableName,
@@ -533,21 +646,32 @@ export async function createClaudeTools(options: ClaudeToolOptions): Promise<Cla
 			onProgress?.(`Searching schema index: ${query}`);
 			onDebugLog?.('tool', 'Schema Index', `Searching schema index for: ${query}`, 'Tool: search_schema');
 
-			const index = await schemaIndexService.loadIndex(config.id);
+			const index = await schemaIndexService.loadIndex(config.id, schemaIndexLookupOptions);
 			if (!index) {
 				return {
 					exists : false,
-					message: 'No local schema index found. Generate it in Settings → Database Connection → Database Schema Index.',
+					message: schemaBranch
+						? `No local schema index found for branch "${schemaBranch}". Generate it in Settings → Database Connection → Database Schema Index, or rely on the fallback/global index.`
+						: 'No local schema index found. Generate it in Settings → Database Connection → Database Schema Index.',
 					databaseName,
 				};
 			}
+
+			const matches = schemaIndexService.searchSchema(index, query, effectiveLimit);
+			addAnswerEvidence(evidenceItems, {
+				kind       : 'schema_lookup',
+				label      : `search_schema("${query}")`,
+				resultCount: matches.length,
+				verified   : matches.length > 0,
+			});
 
 			return {
 				exists        : true,
 				databaseName,
 				generatedAtIso: index.generatedAtIso,
+				branch        : index.branch,
 				source        : index.source,
-				matches       : schemaIndexService.searchSchema(index, query, effectiveLimit),
+				matches,
 			};
 		}));
 
@@ -565,6 +689,12 @@ export async function createClaudeTools(options: ClaudeToolOptions): Promise<Cla
 			onProgress?.(`Listing tables in ${config.name}`);
 			onDebugLog?.('query', 'Database Schema', `Listing tables in ${databaseName}`, 'SHOW TABLES');
 			const result = await databaseService.listTables(config.id, databaseName, dbHostOverride);
+			addAnswerEvidence(evidenceItems, {
+				kind       : 'schema_lookup',
+				label      : `list_tables(${databaseName})`,
+				resultCount: Array.isArray(result) ? result.length : undefined,
+				verified   : Array.isArray(result) && result.length > 0,
+			});
 			onDebugLog?.('query', 'Database Schema', `Found ${(result as string[]).length} tables`);
 			return result;
 		}));
@@ -579,12 +709,19 @@ export async function createClaudeTools(options: ClaudeToolOptions): Promise<Cla
 			const tableName = table_name;
 			onProgress?.(`Describing table: ${tableName}`);
 			onDebugLog?.('query', 'Database Schema', `Describing table: ${tableName}`, `DESCRIBE ${tableName}`);
-			return await databaseService.getTableSchema(
+			const result = await databaseService.getTableSchema(
 				config.id,
 				tableName,
 				databaseName,
 				dbHostOverride,
 			);
+			addAnswerEvidence(evidenceItems, {
+				kind       : 'schema_lookup',
+				label      : `describe_table(${tableName})`,
+				resultCount: Array.isArray(result) ? result.length : undefined,
+				verified   : Array.isArray(result) ? result.length > 0 : true,
+			});
+			return result;
 		}));
 
 		// ============================================================
@@ -606,7 +743,7 @@ export async function createClaudeTools(options: ClaudeToolOptions): Promise<Cla
 			onProgress?.(`Running query: ${shortQuery}`);
 			onDebugLog?.('query', 'Database Query', `Executing query on ${databaseName}`, query);
 
-			const preflight = await preflightQueryAgainstSchemaIndex(schemaIndexService, config.id, query);
+			const preflight = await preflightQueryAgainstSchemaIndex(schemaIndexService, config.id, query, schemaIndexLookupOptions);
 			if (!preflight.ok) {
 				const result = {
 					error         : preflight.error,
@@ -625,11 +762,25 @@ export async function createClaudeTools(options: ClaudeToolOptions): Promise<Cla
 			);
 
 			const queryResultObj = result as { rows?: any[]; rowCount?: number };
+			const rowCount       = typeof queryResultObj.rowCount === 'number'
+				? queryResultObj.rowCount
+				: (Array.isArray(queryResultObj.rows) ? queryResultObj.rows.length : undefined);
 			if (queryResultObj.rows && queryResultObj.rows.length > 0) {
 				queryResults.push({query, data: queryResultObj.rows});
 			}
+			addAnswerEvidence(evidenceItems, {
+				kind    : 'database_query',
+				label   : query,
+				rowCount,
+				verified: true,
+			});
 
-			onDebugLog?.('query', 'Database Query', `Query completed - ${queryResultObj.rowCount || 0} rows returned`);
+			onDebugLog?.(
+				'query',
+				'Database Query',
+				`Query completed - ${queryResultObj.rowCount || 0} rows returned`,
+				formatQueryDebugPreview(result),
+			);
 
 			const {data} = truncateLargeToolResult(result);
 			return data;
@@ -660,6 +811,12 @@ export async function createClaudeTools(options: ClaudeToolOptions): Promise<Cla
 			if (!queryResultObj.rows || queryResultObj.rows.length === 0) {
 				return {error: 'Query returned no data to export'};
 			}
+			addAnswerEvidence(evidenceItems, {
+				kind    : 'csv_export',
+				label   : `${filename}.csv`,
+				rowCount: queryResultObj.rows.length,
+				verified: true,
+			});
 
 			const now          = new Date();
 			const dateStr      = now.toISOString().split('T')[0];
@@ -672,19 +829,30 @@ export async function createClaudeTools(options: ClaudeToolOptions): Promise<Cla
 
 	if (hasGitHub) {
 		tools.push(searchCodeDef.server(async (args) => {
-			const {query}         = args as { query: string };
+			const {query} = args as { query: string };
+			if (toolUsageStats) {
+				toolUsageStats.codeSearches += 1;
+			}
 			codeSearchCallCount += 1;
-			const isOverSoftLimit = codeSearchCallCount > 15;
+			const softLimit       = getCodeSearchSoftLimit(!!localRepoUrl);
+			const isOverSoftLimit = codeSearchCallCount > softLimit;
 			if (isOverSoftLimit) {
-				onDebugLog?.('tool', 'Ripgrep', `Code search #${codeSearchCallCount} (over soft limit of 15). Consider using read_file instead.`, query);
+				onDebugLog?.('tool', 'Ripgrep', getCodeSearchSoftLimitMessage(codeSearchCallCount, softLimit, !!localRepoUrl), query);
 			}
 			onProgress?.(`Searching code: ${query.substring(0, 40)}...`);
-			onDebugLog?.('tool', 'GitHub', `Searching code: ${query}`, 'Tool: search_code');
+			onDebugLog?.('tool', 'Repository', `Searching code: ${query}`, 'Tool: search_code');
 			if (localRepoUrl) {
 				const branch = githubBranchOverride?.trim() || githubConfig?.branch || 'main';
 				onDebugLog?.('tool', 'Ripgrep', `Searching local repo (${branch})`);
 				try {
 					const localResult = await githubService.searchCodeLocal(query, branch, localRepoUrl);
+					addAnswerEvidence(evidenceItems, {
+						kind       : 'code_search',
+						label      : query,
+						resultCount: Array.isArray(localResult) ? localResult.length : undefined,
+						detail     : `local repo branch ${branch}`,
+						verified   : false,
+					});
 					const meta        = githubService.getLastLocalSearchMeta();
 					if (meta) {
 						onDebugLog?.(
@@ -698,16 +866,29 @@ export async function createClaudeTools(options: ClaudeToolOptions): Promise<Cla
 					}
 					const {data} = truncateLargeToolResult(localResult);
 					if (isOverSoftLimit) {
-						return {data, note: `Search #${codeSearchCallCount}. Tip: use read_file to read specific files you already found.`};
+						return {
+							data,
+							note: `Search #${codeSearchCallCount}. Tip: once you know the right file, switch to read_file or read_file_section for verification.`,
+						};
 					}
 					return data;
 				} catch (error) {
 					const message = error instanceof Error ? error.message : String(error);
-					onDebugLog?.('error', 'Ripgrep', 'Local search failed, falling back to GitHub API', message);
+					onDebugLog?.('error', 'Repository', 'Local repository search failed', message);
+					return {
+						error: `Local repository search failed: ${message}. Remote fallback is disabled while Local Git Sync is configured.`,
+					};
 				}
 			}
 			const result = await githubService.searchCode(query, githubBranchOverride);
-			onDebugLog?.('tool', 'GitHub', `GitHub API search completed - found ${(result as any).length || 0} results`);
+			addAnswerEvidence(evidenceItems, {
+				kind       : 'code_search',
+				label      : query,
+				resultCount: Array.isArray(result) ? result.length : undefined,
+				detail     : githubBranchOverride ? `branch ${githubBranchOverride}` : undefined,
+				verified   : false,
+			});
+			onDebugLog?.('tool', 'Repository', `GitHub API search completed - found ${(result as any).length || 0} results`);
 			const {data} = truncateLargeToolResult(result);
 			return data;
 		}));
@@ -716,16 +897,20 @@ export async function createClaudeTools(options: ClaudeToolOptions): Promise<Cla
 			const {query, max_files, context_lines} = args as { query: string; max_files?: number; context_lines?: number };
 			const maxFiles                          = typeof max_files === 'number' ? max_files : 3;
 			const ctxLines                          = typeof context_lines === 'number' ? context_lines : 40;
+			if (toolUsageStats) {
+				toolUsageStats.contextSearches += 1;
+			}
 
 			// Count towards code search limit (shared with search_code)
 			codeSearchCallCount += 1;
-			const isOverSoftLimit = codeSearchCallCount > 15;
+			const softLimit       = getCodeSearchSoftLimit(!!localRepoUrl);
+			const isOverSoftLimit = codeSearchCallCount > softLimit;
 			if (isOverSoftLimit) {
-				onDebugLog?.('tool', 'Ripgrep', `Code search #${codeSearchCallCount} (over soft limit of 15). Consider using read_file instead.`, query);
+				onDebugLog?.('tool', 'Ripgrep', getCodeSearchSoftLimitMessage(codeSearchCallCount, softLimit, !!localRepoUrl), query);
 			}
 
 			onProgress?.(`Searching code context: ${query.substring(0, 40)}...`);
-			onDebugLog?.('tool', 'GitHub', `Searching code context: ${query}`, 'Tool: search_code_context');
+			onDebugLog?.('tool', 'Repository', `Searching code context: ${query}`, 'Tool: search_code_context');
 
 			const branch = githubBranchOverride?.trim() || githubConfig?.branch || 'main';
 			const url    = githubService.getLocalRepoUrl();
@@ -755,6 +940,13 @@ export async function createClaudeTools(options: ClaudeToolOptions): Promise<Cla
 				const excerpt    = await githubService.readFileLocalSnippet(r.path, branch, url, start, end);
 				contexts.push({path: r.path, excerpt});
 			}
+			addAnswerEvidence(evidenceItems, {
+				kind       : 'code_context',
+				label      : query,
+				resultCount: contexts.length,
+				detail     : contexts.map((c) => c.path).join(', '),
+				verified   : contexts.length > 0,
+			});
 
 			const totalMs = Date.now() - startTime;
 			onDebugLog?.('tool', 'Ripgrep', `Context extraction completed in ${totalMs}ms`, `Extracted ${contexts.length} snippets`);
@@ -762,7 +954,7 @@ export async function createClaudeTools(options: ClaudeToolOptions): Promise<Cla
 			if (isOverSoftLimit) {
 				return {
 					data: contexts,
-					note: `Search #${codeSearchCallCount}. Tip: use read_file or read_file_section to read specific files you already found.`,
+					note: `Search #${codeSearchCallCount}. Tip: once you know the right file, switch to read_file or read_file_section for verification.`,
 				};
 			}
 			return contexts;
@@ -783,8 +975,11 @@ export async function createClaudeTools(options: ClaudeToolOptions): Promise<Cla
 		tools.push(readFileSectionDef.server(async (args) => {
 			const {file_path, start_line, end_line} = args as { file_path: string; start_line: number; end_line: number };
 			const clampedEnd                        = Math.min(end_line, start_line + 300);
+			if (toolUsageStats) {
+				toolUsageStats.fileSectionReads += 1;
+			}
 			onProgress?.(`Reading ${file_path}:${start_line}-${clampedEnd}`);
-			onDebugLog?.('tool', 'GitHub', `Reading file section: ${file_path} lines ${start_line}-${clampedEnd}`, 'Tool: read_file_section');
+			onDebugLog?.('tool', 'Repository', `Reading file section: ${file_path} lines ${start_line}-${clampedEnd}`, 'Tool: read_file_section');
 
 			const branch = githubBranchOverride?.trim() || githubConfig?.branch || 'main';
 			const url    = githubService.getLocalRepoUrl();
@@ -793,6 +988,12 @@ export async function createClaudeTools(options: ClaudeToolOptions): Promise<Cla
 				const fullContent = await githubService.getFileContent(file_path, githubBranchOverride);
 				if (typeof fullContent === 'string') {
 					const lines = fullContent.split('\n');
+					addAnswerEvidence(evidenceItems, {
+						kind    : 'file_read',
+						label   : file_path,
+						detail  : `lines ${start_line}-${clampedEnd}`,
+						verified: true,
+					});
 					return {
 						file   : file_path,
 						lines  : `${start_line}-${clampedEnd}`,
@@ -804,6 +1005,12 @@ export async function createClaudeTools(options: ClaudeToolOptions): Promise<Cla
 			}
 
 			const snippet = await githubService.readFileLocalSnippet(file_path, branch, url, start_line, clampedEnd);
+			addAnswerEvidence(evidenceItems, {
+				kind    : 'file_read',
+				label   : file_path,
+				detail  : `lines ${start_line}-${clampedEnd}`,
+				verified: true,
+			});
 			return {
 				file   : file_path,
 				lines  : `${start_line}-${clampedEnd}`,
@@ -813,13 +1020,22 @@ export async function createClaudeTools(options: ClaudeToolOptions): Promise<Cla
 
 		tools.push(readFileDef.server(async (args) => {
 			const {file_path} = args as { file_path: string };
+			if (toolUsageStats) {
+				toolUsageStats.fileReads += 1;
+			}
 			onProgress?.(`Reading file: ${file_path}`);
-			onDebugLog?.('tool', 'GitHub', `Reading file: ${file_path}`, 'Tool: read_file');
+			onDebugLog?.('tool', 'Repository', `Reading file: ${file_path}`, 'Tool: read_file');
 			if (localRepoUrl) {
 				onDebugLog?.('tool', 'Ripgrep', 'Attempting local file read', file_path);
 			}
 			const result = await githubService.getFileContent(file_path, githubBranchOverride);
-			onDebugLog?.('tool', 'GitHub', `File read successfully: ${file_path}`);
+			addAnswerEvidence(evidenceItems, {
+				kind    : 'file_read',
+				label   : file_path,
+				detail  : githubBranchOverride ? `branch ${githubBranchOverride}` : undefined,
+				verified: typeof result === 'string' && result.length > 0,
+			});
+			onDebugLog?.('tool', 'Repository', `File read successfully: ${file_path}`);
 			const {data} = truncateLargeToolResult(result);
 			return data;
 		}));
@@ -827,25 +1043,77 @@ export async function createClaudeTools(options: ClaudeToolOptions): Promise<Cla
 		tools.push(listFilesDef.server(async (args) => {
 			const {directory_path} = args as { directory_path: string };
 			onProgress?.(`Listing files in: ${directory_path || '/'} `);
-			onDebugLog?.('tool', 'GitHub', `Listing files in: ${directory_path || '/'}`, 'Tool: list_files');
+			onDebugLog?.('tool', 'Repository', `Listing files in: ${directory_path || '/'}`, 'Tool: list_files');
 			if (localRepoUrl) {
 				onDebugLog?.('tool', 'Ripgrep', 'Attempting local directory listing', directory_path || '/');
 			}
 			const result = await githubService.listFiles(directory_path, githubBranchOverride);
-			onDebugLog?.('tool', 'GitHub', `Listed ${(result as any).length || 0} files`);
+			addAnswerEvidence(evidenceItems, {
+				kind       : 'code_search',
+				label      : `list_files(${directory_path || '/'})`,
+				resultCount: Array.isArray(result) ? result.length : undefined,
+				verified   : false,
+			});
+			onDebugLog?.('tool', 'Repository', `Listed ${(result as any).length || 0} files`);
 			const {data} = truncateLargeToolResult(result);
 			return data;
 		}));
 
 		tools.push(getRepositoryStructureDef.server(async () => {
 			onProgress?.('Getting repository structure');
-			onDebugLog?.('tool', 'GitHub', 'Getting repository structure', 'Tool: get_repository_structure');
+			onDebugLog?.('tool', 'Repository', 'Getting repository structure', 'Tool: get_repository_structure');
 			if (localRepoUrl) {
 				onDebugLog?.('tool', 'Ripgrep', 'Attempting local tree fetch', localRepoUrl);
 			}
 			const result = await githubService.getTree(true, githubBranchOverride);
-			onDebugLog?.('tool', 'GitHub', 'Repository structure retrieved');
+			addAnswerEvidence(evidenceItems, {
+				kind       : 'code_search',
+				label      : 'get_repository_structure',
+				resultCount: Array.isArray(result) ? result.length : undefined,
+				verified   : false,
+			});
+			onDebugLog?.('tool', 'Repository', 'Repository structure retrieved');
 			const {data} = truncateLargeToolResult(result);
+			return data;
+		}));
+	}
+
+	if (hasSpyCodeAi) {
+		tools.push(spySearchCodeDef.server(async (args) => {
+			if (toolUsageStats) {
+				toolUsageStats.codeSearches += 1;
+			}
+			const query = String((args as { query?: string }).query || '');
+			onProgress?.(`Searching indexed SPY code: ${query.substring(0, 40)}...`);
+			onDebugLog?.('tool', 'Spy Code AI MCP', `Searching indexed code: ${query}`, 'Tool: spy_search_code');
+			const raw    = await spyCodeAiMcpService.searchCode(args as any);
+			addAnswerEvidence(evidenceItems, {
+				kind       : 'mcp_index',
+				label      : query,
+				resultCount: Array.isArray(raw) ? raw.length : undefined,
+				detail     : 'spy_search_code indexed result',
+				verified   : false,
+			});
+			const {data} = truncateLargeToolResult(raw);
+			return data;
+		}));
+
+		tools.push(spySearchContextDef.server(async (args) => {
+			if (toolUsageStats) {
+				toolUsageStats.contextSearches += 1;
+			}
+			const query = String((args as { query?: string }).query || '');
+			onProgress?.(`Searching indexed SPY context: ${query.substring(0, 40)}...`);
+			onDebugLog?.('tool', 'Spy Code AI MCP', `Searching indexed context: ${query}`, 'Tool: spy_search_context');
+			const raw    = await spyCodeAiMcpService.searchContext(args as any);
+			addAnswerEvidence(evidenceItems, {
+				kind       : 'mcp_index',
+				label      : query,
+				resultCount: Array.isArray(raw) ? raw.length : undefined,
+				detail     : 'spy_search_context indexed result',
+				verified   : false,
+			});
+			const {data} = truncateLargeToolResult(raw);
 			return data;
 		}));
 	}

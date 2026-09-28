@@ -1,6 +1,24 @@
 import {contextBridge, ipcRenderer} from 'electron';
 import type {DatabaseConfig} from './types';
 
+interface DebugLogEntry {
+	id: string;
+	timestamp: string;
+	type: 'query' | 'tool' | 'api' | 'error' | 'info';
+	category: string;
+	message: string;
+	details?: string;
+	chatId?: string;
+	runId?: string;
+	provider?: 'claude' | 'openai';
+	phase?: 'prepare' | 'retrieval' | 'technical' | 'postprocess' | 'tool' | 'stream' | 'ipc' | 'background' | 'other';
+	toolName?: string;
+	durationMs?: number;
+	status?: 'started' | 'completed' | 'failed' | 'info';
+	rowCount?: number;
+	meta?: Record<string, string | number | boolean | null | undefined>;
+}
+
 contextBridge.exposeInMainWorld('electronAPI', {
 	testDatabaseConnection: (config: DatabaseConfig) =>
 		ipcRenderer.invoke('test-database-connection', config),
@@ -16,11 +34,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
 		ipcRenderer.invoke('get-systems', statuses),
 
 	// Schema index
-	getSchemaIndexStatus: (configId: string) =>
-		ipcRenderer.invoke('get-schema-index-status', configId),
+	getSchemaIndexStatus: (configId: string, branch?: string) =>
+		ipcRenderer.invoke('get-schema-index-status', configId, branch),
 
-	generateSchemaIndex: (configId: string, databaseName: string) =>
-		ipcRenderer.invoke('generate-schema-index', configId, databaseName),
+	generateSchemaIndex: (configId: string, databaseName: string, branch?: string) =>
+		ipcRenderer.invoke('generate-schema-index', configId, databaseName, branch),
 
 	onSchemaIndexProgress: (callback: (progress: { stage: string; done: number; total: number }) => void) => {
 		const listener = (_event: any, progress: { stage: string; done: number; total: number }) => callback(progress);
@@ -135,6 +153,24 @@ contextBridge.exposeInMainWorld('electronAPI', {
 	saveApiKey: (apiKey: string) =>
 		ipcRenderer.invoke('save-api-key', apiKey),
 
+	getOpenAiApiKey: () =>
+		ipcRenderer.invoke('get-openai-api-key'),
+
+	saveOpenAiApiKey: (apiKey: string) =>
+		ipcRenderer.invoke('save-openai-api-key', apiKey),
+
+	getSelectedModel: () =>
+		ipcRenderer.invoke('get-selected-model'),
+
+	saveSelectedModel: (model: string) =>
+		ipcRenderer.invoke('save-selected-model', model),
+
+	getAiQualityProfile: () =>
+		ipcRenderer.invoke('get-ai-quality-profile'),
+
+	saveAiQualityProfile: (profile: string) =>
+		ipcRenderer.invoke('save-ai-quality-profile', profile),
+
 	// Chat management
 	getChats: () =>
 		ipcRenderer.invoke('get-chats'),
@@ -150,6 +186,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
 	deleteChat: (chatId: string) =>
 		ipcRenderer.invoke('delete-chat', chatId),
+
+	clearAllChats: () =>
+		ipcRenderer.invoke('clear-all-chats'),
 
 	setWorkingSummary: (chatId: string, text: string) =>
 		ipcRenderer.invoke('set-working-summary', chatId, text),
@@ -189,15 +228,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
 			ipcRenderer.removeListener('local-repo-sync-progress', listener);
 		};
 	},
-
-	// Git installation
-	checkGitInstalled: () =>
-		ipcRenderer.invoke('check-git-installed') as Promise<{ installed: boolean; version: string | null }>,
-
-	installGit: () =>
-		ipcRenderer.invoke('install-git') as Promise<{ success: boolean }>,
-
-	// User settings
+// Git installation
+// User settings
 	getUserName: () =>
 		ipcRenderer.invoke('get-user-name'),
 
@@ -222,8 +254,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
 	},
 
 	// Debug logging
-	onDebugLog: (callback: (log: any) => void) => {
-		const listener = (_event: any, log: any) => callback(log);
+	onDebugLog: (callback: (log: DebugLogEntry) => void) => {
+		const listener = (_event: any, log: DebugLogEntry) => callback(log);
 		ipcRenderer.on('debug-log', listener);
 		return () => {
 			ipcRenderer.removeListener('debug-log', listener);

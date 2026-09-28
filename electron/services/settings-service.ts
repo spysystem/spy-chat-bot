@@ -2,9 +2,13 @@ import {app} from 'electron';
 import * as fs from 'fs';
 import * as path from 'path';
 
+export type AiQualityProfile = 'balanced' | 'maximum_accuracy';
+
 export interface UserSettings {
 	userName?: string;
 	localRepoUrl?: string;
+	selectedModel?: 'claude' | 'openai';
+	aiQualityProfile?: AiQualityProfile;
 }
 
 export class SettingsService {
@@ -60,6 +64,28 @@ export class SettingsService {
 	async saveLocalRepoUrl(localRepoUrl: string): Promise<void> {
 		const settings        = await this.getSettings();
 		settings.localRepoUrl = localRepoUrl;
+		await this.saveSettings(settings);
+	}
+
+	async getSelectedModel(): Promise<'claude' | 'openai'> {
+		const settings = await this.getSettings();
+		return settings.selectedModel || 'claude';
+	}
+
+	async saveSelectedModel(model: 'claude' | 'openai'): Promise<void> {
+		const settings         = await this.getSettings();
+		settings.selectedModel = model;
+		await this.saveSettings(settings);
+	}
+
+	async getAiQualityProfile(): Promise<AiQualityProfile> {
+		const settings = await this.getSettings();
+		return settings.aiQualityProfile || 'maximum_accuracy';
+	}
+
+	async saveAiQualityProfile(profile: AiQualityProfile): Promise<void> {
+		const settings           = await this.getSettings();
+		settings.aiQualityProfile = profile;
 		await this.saveSettings(settings);
 	}
 
