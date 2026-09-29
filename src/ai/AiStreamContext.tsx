@@ -1,7 +1,7 @@
 import React, {createContext, JSX, useContext, useEffect, useMemo, useRef, useState} from 'react';
 import type {AttachmentMeta} from '../types';
 
-export type AiStreamStatus = 'idle' | 'running' | 'stopping' | 'error';
+type AiStreamStatus = 'idle' | 'running' | 'stopping' | 'error';
 
 export interface ChatStreamState {
 	chatId: string;
@@ -10,13 +10,14 @@ export interface ChatStreamState {
 	startedAtMs: number;
 	lastEventAtMs: number;
 	partialText: string;
+	currentMessageId?: string;
 	inTextMessage: boolean;
 	hasStreamedContent: boolean;
 	progressStatus: string;
 	error?: string;
 }
 
-export interface SendAiMessageInput {
+interface SendAiMessageInput {
 	chatId: string;
 	message: string;
 	databases: string[];
@@ -25,7 +26,7 @@ export interface SendAiMessageInput {
 	attachments?: AttachmentMeta[];
 }
 
-export interface ClarificationRequest {
+interface ClarificationRequest {
 	chatId: string;
 	question: string;
 	options?: string[];
@@ -63,7 +64,8 @@ export function AiStreamProvider({children}: { children: React.ReactNode }): JSX
 				return;
 			}
 			if (aiEvent.type === 'TEXT_MESSAGE_START') {
-				// Treat as a boundary hint; never reset text if we already have content.
+				// Each model turn starts a new text message. Text written before a tool call is a
+				// progress note, so a new turn replaces it; the last turn's text is the answer.
 				setStreamsByChatId((prev) => {
 					const current = prev.get(chatId);
 					if (!current) {
@@ -73,11 +75,14 @@ export function AiStreamProvider({children}: { children: React.ReactNode }): JSX
 					if (aiEvent.role && String(aiEvent.role).toLowerCase() !== 'assistant') {
 						return prev;
 					}
-					const next = new Map(prev);
+					const isNewMessage = !!aiEvent.messageId && aiEvent.messageId !== current.currentMessageId;
+					const next         = new Map(prev);
 					next.set(chatId, {
 						...current,
-						inTextMessage: true,
-						lastEventAtMs: Date.now(),
+						partialText     : isNewMessage ? '' : current.partialText,
+						currentMessageId: aiEvent.messageId ?? current.currentMessageId,
+						inTextMessage   : true,
+						lastEventAtMs   : Date.now(),
 					});
 					return next;
 				});

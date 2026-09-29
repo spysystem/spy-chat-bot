@@ -10,7 +10,7 @@ interface DebugLogEntry {
 	details?: string;
 	chatId?: string;
 	runId?: string;
-	provider?: 'claude' | 'openai';
+	provider?: 'claude';
 	phase?: 'prepare' | 'retrieval' | 'technical' | 'postprocess' | 'tool' | 'stream' | 'ipc' | 'background' | 'other';
 	toolName?: string;
 	durationMs?: number;
@@ -73,16 +73,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
 	openAttachment: (storedPath: string) =>
 		ipcRenderer.invoke('open-attachment', storedPath),
-
-	sendMessage: (
-		chatId: string,
-		message: string,
-		databases: string[],
-		history?: Array<{ role: string; content: string }>,
-		chatContext?: { databaseName?: string; dbHost?: string; githubBranch?: string },
-		attachments?: any[],
-	) =>
-		ipcRenderer.invoke('send-message', chatId, message, databases, history, chatContext, attachments),
 
 	startAiStream: (
 		chatId: string,
@@ -153,18 +143,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
 	saveApiKey: (apiKey: string) =>
 		ipcRenderer.invoke('save-api-key', apiKey),
 
-	getOpenAiApiKey: () =>
-		ipcRenderer.invoke('get-openai-api-key'),
-
-	saveOpenAiApiKey: (apiKey: string) =>
-		ipcRenderer.invoke('save-openai-api-key', apiKey),
-
-	getSelectedModel: () =>
-		ipcRenderer.invoke('get-selected-model'),
-
-	saveSelectedModel: (model: string) =>
-		ipcRenderer.invoke('save-selected-model', model),
-
 	getAiQualityProfile: () =>
 		ipcRenderer.invoke('get-ai-quality-profile'),
 
@@ -190,9 +168,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
 	clearAllChats: () =>
 		ipcRenderer.invoke('clear-all-chats'),
 
-	setWorkingSummary: (chatId: string, text: string) =>
-		ipcRenderer.invoke('set-working-summary', chatId, text),
-
 	clearWorkingSummary: (chatId: string) =>
 		ipcRenderer.invoke('clear-working-summary', chatId),
 
@@ -215,11 +190,23 @@ contextBridge.exposeInMainWorld('electronAPI', {
 	validateGitHubConfig: () =>
 		ipcRenderer.invoke('validate-github-config'),
 
+	getSentryConfig: () =>
+		ipcRenderer.invoke('get-sentry-config'),
+
+	saveSentryConfig: (config: { token?: string; orgSlug?: string; baseUrl?: string }) =>
+		ipcRenderer.invoke('save-sentry-config', config),
+
+	validateSentryConfig: () =>
+		ipcRenderer.invoke('validate-sentry-config'),
+
 	getLocalRepoStatus: () =>
 		ipcRenderer.invoke('get-local-repo-status'),
 
 	syncLocalRepo: (url: string) =>
 		ipcRenderer.invoke('sync-local-repo', url),
+
+	listRepoBranches: () =>
+		ipcRenderer.invoke('list-repo-branches'),
 
 	onLocalRepoSyncProgress: (callback: (progress: { stage: string; percent?: number; message?: string }) => void) => {
 		const listener = (_event: any, progress: { stage: string; percent?: number; message?: string }) => callback(progress);

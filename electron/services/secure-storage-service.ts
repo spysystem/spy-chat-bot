@@ -77,17 +77,4 @@ export class SecureStorageService {
 			return null;
 		}
 	}
-
-	/**
-	 * Delete encrypted file
-	 */
-	async deleteEncrypted(key: string): Promise<void> {
-		try {
-			const filePath = path.join(this.securePath, `${key}.encrypted`);
-			await fs.unlink(filePath);
-			console.log(`[SecureStorage] Deleted encrypted data: ${key}`);
-		} catch (error) {
-			// File doesn't exist, ignore
-		}
-	}
 }

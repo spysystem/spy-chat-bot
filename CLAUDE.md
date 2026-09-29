@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Spørge Jørgen** is an Electron-based desktop support application that enables non-technical customer support staff to query databases and explore
 codebases using natural language. The app acts as an intelligent assistant (Jørgen) that translates user questions into database queries and code
-searches, then simplifies technical results into business-friendly language.
+searches, and answers in business-friendly language.
 
 **Product Name:** Spørge Jørgen ("Ask George" in Danish)
 **App ID:** com.spy.support-claude
@@ -33,7 +33,7 @@ npm run package:linux          # Linux (AppImage)
 **Development workflow:**
 
 - Frontend runs on `http://localhost:5173` (Vite dev server)
-- Electron main process auto-reloads via nodemon
+- Main-process changes need a restart of `npm run dev` (no auto-reload)
 - TypeScript compilation happens automatically
 
 ## Architecture Overview
@@ -56,10 +56,11 @@ npm run package:linux          # Linux (AppImage)
                  │
 ┌────────────────▼────────────────────────────────────────┐
 │ Services Layer (electron/services/)                     │
-│ - ClaudeService: Anthropic API orchestration            │
+│ - ClaudeService: Claude agent loop (Opus 5)             │
+│ - claude-tools: tool definitions for the agent          │
 │ - DatabaseService: Multi-layer read-only enforcement    │
-│ - GitHubService: Repository code exploration            │
-│ - VectorStoreService: Semantic knowledge retrieval      │
+│ - GitHubService + LocalRepoService: code access / sync  │
+│ - KnowledgeService: BM25 search over SPY knowledge      │
 │ - ChatService: Persistent conversation storage          │
 │ - SettingsService: User preferences                     │
 └─────────────────────────────────────────────────────────┘
@@ -69,43 +70,53 @@ npm run package:linux          # Linux (AppImage)
 
 **ClaudeService** (`electron/services/claude-service.ts`)
 
-- Orchestrates all Claude API interactions
-- Manages extended thinking mode (2000 token budget)
-- Implements two-stage response flow:
-    1. **Technical stage:** Claude uses tools (database queries, GitHub searches) with full context
-    2. **Simplification stage:** Converts technical response to business-friendly language
-- Handles CSV export tool for data extraction requests
-- Integrates vector store context into system prompts
+- Uses the official `@anthropic-ai/sdk` directly (no TanStack/OpenAI layer). Model `claude-opus-5` (`MAIN_MODEL`); title and working-summary calls use `claude-haiku-4-5`
+- One streaming agent loop (`client.beta.messages.stream`): adaptive thinking (`display: "summarized"`), `output_config.effort` from the quality setting (Balanced = `medium`, Maximum Accuracy = `high`), prompt caching (static system block + automatic top-level cache), server-side refusal fallback (`fallbacks: "default"`, beta `server-side-fallback-2026-07-01`)
+- Up to 40 model turns; tool calls in a turn run in parallel; the last turn uses `tool_choice: none` so the model must answer
+- The model writes the user-facing answer itself - there is no separate "simplification" pass. `detailedAnswer` = answer + an "Investigation details" appendix (SQL run, files read, searches) built from the tool evidence log
+- System prompt = `STATIC_SYSTEM_PROMPT` (cached) + a per-request block (connected database, branch, available sources, working summary, knowledge-base matches)
+- After each answer a working summary is written in the background (Haiku) and stored on the chat; the next turn waits for it
+- Emits AG-UI-style events to the renderer (`TEXT_MESSAGE_START/CONTENT/END` with a per-turn `messageId`, `TOOL_CALL_START/END`, `STEP_STARTED/FINISHED` for thinking, `RUN_STARTED/FINISHED`). The renderer replaces the streamed text when a new turn starts, so pre-tool progress notes are not kept
+
+**Agent tools** (`electron/services/claude-tools.ts`) - only registered when the source is configured:
+
+- Database: `search_schema`, `describe_table` (schema index, falls back to live `DESCRIBE`), `query_database` (≤200 rows as TSV; errors come back with schema suggestions), `export_to_csv` (full result to Downloads, UTF-8 BOM)
+- Code (local clone): `search_code` (ripgrep; literal by default, optional regex/path/glob/context), `read_file` (line ranges, 1500 lines per call), `list_directory`, `find_files`. Without a local clone, GitHub API fallbacks for `search_code`/`read_file`/`list_directory`
+- Code history (local clone): `file_history` (commits touching a path, optional pickaxe `search`, each annotated with the first `YYYY_MM` release branch containing it), `show_commit`, `compare_branches` (e.g. `2026_07..2026_09`)
+- Sentry (when a token is set in Settings): `search_errors` (issues + counts for the chat's system via the `system_key` tag, Discover events API) and `get_error_details` (latest event's stack trace, request, breadcrumbs; server paths trimmed to repo paths)
+- `spy_search_code` / `spy_search_context` when the spy-code-ai MCP server is configured (Cursor MCP config)
+- `search_knowledge` (always) and `ask_clarifying_question` (ends the run and shows the question with clickable options)
 
 **DatabaseService** (`electron/services/database-service.ts`)
 
 - **CRITICAL:** Enforces READ-ONLY database access at 5 layers:
     1. Query whitelist (SELECT, SHOW, DESCRIBE, EXPLAIN only)
-    2. Keyword blacklist (blocks INSERT, UPDATE, DELETE, etc.)
+    2. Keyword blacklist (blocks INSERT, UPDATE, DELETE, etc.; the `REPLACE(...)` string function is allowed)
     3. Multiple statement protection (semicolon detection)
     4. MySQL session read-only mode (`SET SESSION TRANSACTION READ ONLY`)
-    5. Read-only transaction enforcement
+    5. Every query runs in its own `START TRANSACTION READ ONLY` ... `ROLLBACK` (fresh snapshot per query)
 - Logs all queries with timestamps to `query-log.txt`
-- Connection pooling with unique keys per database
+- One `mysql2` pool per config/host/database (dead connections are replaced automatically)
 - Supports dynamic database selection (not hardcoded in config)
 
-**VectorStoreService** (`electron/services/vector-store-service.ts`)
+**SentryService** (`electron/services/sentry-service.ts`)
 
-- Pre-built vector store loaded from `assets/vector/vector.store`
-- Uses Claude Haiku 3.5 for semantic document retrieval
-- Context-aware search: combines recent conversation history with current query
-- Returns top 3 most relevant knowledge documents
-- Documents are injected into Claude's system prompt
+- Token/org/API URL stored encrypted (`secure/sentry-config.encrypted`); the token is never sent to the renderer. Defaults: org `spy-aps`, `https://us.sentry.io`
+- Customer systems tag events with `system_key`, which equals the system directory's `systemKey` stored on the chat
 
-**GitHubService** (`electron/services/github-service.ts`)
+**KnowledgeService** (`electron/services/knowledge-service.ts`)
 
-- GitHub API integration for code exploration tools
-- Supports both classic tokens (`ghp_*`) and fine-grained tokens (`github_pat_*`)
-- Provides tools to Claude:
-    - `search_code`: GitHub code search
-    - `read_file`: Fetch file contents from repository
-    - `list_files`: List directory contents
-    - `get_repository_structure`: Full recursive tree
+- Loads `assets/vector/vector.store` (JSONL chunks; the stored embeddings are unused because there is no local query-embedding model)
+- BM25 keyword ranking; the top 4 matches for the question are put in the system prompt, and the model can call `search_knowledge`
+
+**GitHubService** (`electron/services/github-service.ts`) and **LocalRepoService** (`electron/services/local-repo-service.ts`)
+
+- GitHubService holds the encrypted GitHub config (token/owner/repo), validates it, and offers REST API fallbacks
+- LocalRepoService owns Local Git Sync under `userData/repos/`: a partial clone (`--filter=blob:none --no-checkout`) in `spy/`, one **detached** worktree per branch in `spy-worktrees/`, and state in `spy-state.json`
+- The token is sent as an `http.extraheader` through `GIT_CONFIG_*` environment variables - it is never written to `.git/config` or command lines. Works with classic and fine-grained PATs
+- All git mutations are serialised by one lock (the model calls tools in parallel). Branches are fetched when older than 5 minutes; a worktree is moved to its branch's latest commit whenever it is used; "Sync Repository" and the 20-minute background job fetch and refresh every worktree, remove worktrees for deleted branches, and prune ones unused for 21 days
+- Clones go to a temp dir and are renamed on success; a broken clone or a changed repository URL triggers a fresh clone
+- A chat without a branch uses the repository's default branch (`origin/HEAD`), not the unused `branch` field in the GitHub config
 
 ### Deep Link Protocol
 
@@ -177,24 +188,18 @@ To require users to update (cannot dismiss modal):
 - `App.tsx` - Integrates modal with auto-update events
 - `electron/main.ts:23` - `autoUpdater.autoDownload = true` for automatic downloads
 
-### CSV Export Intelligence
+### CSV Export
 
-When users ask for "list", "liste", "udtræk", "export", "oversigt" - the app automatically:
+When users ask for a list/export/extract ("liste", "udtræk", "oversigt", "export"), the system prompt tells the model to call `export_to_csv`. Files are saved to the Downloads folder as `<descriptive_name>_YYYY-MM-DD_HH-MM-SS.csv` and the model names the file in its answer.
 
-1. Detects export keywords in user message
-2. Tracks query results from Claude's database queries
-3. Auto-exports largest result (≥10 rows) to Downloads folder
-4. Injects CSV creation info into conversation
-5. Claude mentions the file in final answer
+### Record Links and Charts in Answers
 
-Files are saved as: `export_YYYY-MM-DD_HH-MM-SS.csv`
+- The static system prompt lists URL templates for SPY record pages (sales order `/go/sales-order/{id}`, customer, style, claim, delivery, purchase order, supplier, user, ...); the per-chat block gives the base URL from the chat's `systemUrl`. Links open in the user's browser - `routeLinksToBrowser()` in `main.ts` stops the app window from navigating away
+- The model can emit a ` ```chart ` fenced block with JSON (`{"type": "bar"|"line", "title", "unit", "x": [...], "series": [{"name", "values"}]}`); `MarkdownPre` in `src/components/ChartBlock.tsx` renders it as an SVG chart (max 4 series, legend, hover tooltip, table toggle, light/dark palette in `ChartBlock.css`)
 
 ### Multi-Language Support
 
-- Detects user's language automatically
-- System prompts enforce: "ALWAYS respond in the same language as the user's question"
-- Bilingual system knowledge (English/Danish)
-- Simplification stage preserves original language
+- The system prompt tells the model to answer in the user's language while keeping SPY's English UI terms (consignment, style, assortment, ...) untranslated
 
 ### Debug Window
 
@@ -250,6 +255,8 @@ electron/
 src/
   App.tsx              # Main app with sidebar, navigation, deep link handler
   ThemeContext.tsx     # Dark/light theme provider
+  ai/
+    AiStreamContext.tsx  # Stream state per chat, clarification flow
   components/
     ChatView.tsx       # Chat interface with message history
     SettingsView.tsx   # Configuration UI
@@ -257,9 +264,10 @@ src/
     ConfirmModal.tsx   # Reusable confirmation dialog
 
 assets/
+  prompts/
+    spy-code-ai-chatbot.mdc  # Extra system prompt when the spy-code-ai MCP is configured
   vector/
-    vector.store       # Pre-built semantic knowledge base
-    system-knowledge.json  # Source documents for vector store
+    vector.store       # SPY knowledge chunks (JSONL), searched with BM25
 
 dist/
   electron/            # Compiled main process (TypeScript → CommonJS)
@@ -277,7 +285,8 @@ All user configuration stored in Electron's userData directory:
 - `database-configs.json` - Array of database connection configs
 - `github-config.json` - GitHub token, owner, repo, branch
 - `chats.json` - Persistent chat history
-- `settings.json` - User name, auto-TL;DR preference
+- `user-settings.json` - User name, local repo URL, answer quality profile
+- `repos/` - Local Git Sync clone, worktrees and `spy-state.json`
 - `query-log.txt` - All executed queries with timestamps
 
 ## TypeScript Configuration
@@ -313,12 +322,12 @@ ipcMain.handle('send-message', async (event, message, databases, history, databa
 
 ### Tool Use Loop
 
-ClaudeService implements agentic tool use:
+`ClaudeService.sendMessage()` runs the loop itself (no SDK tool runner):
 
-1. Send message with tools available
-2. If `stop_reason === 'tool_use'`: execute tools, return results, repeat
-3. Max 10 iterations to prevent infinite loops
-4. Progress callbacks update UI during each tool use
+1. Stream a request with all tools; forward text/thinking/tool events to the renderer
+2. If `stop_reason === 'tool_use'`: run every tool call of the turn in parallel, send all results in one user message, repeat
+3. At most 40 turns; the final turn forces `tool_choice: none`
+4. `refusal` (after server-side fallback) and `pause_turn` are handled explicitly
 
 ### Read-Only Enforcement
 
@@ -331,7 +340,7 @@ DatabaseService security cannot be bypassed:
 
 ## Asset Copying
 
-The `copy:assets` script copies `assets/` to `dist/assets/` during build. Vector store must be in `dist/assets/vector/vector.store` at runtime.
+The `copy:assets` script copies `assets/` to `dist/assets/` during build. The knowledge store must be in `dist/assets/vector/vector.store` at runtime.
 
 ## Testing Database Connections
 
@@ -354,16 +363,13 @@ Use the Settings view to:
 
 **Modify Claude's behavior:**
 
-- Edit system prompt in `ClaudeService.sendMessage()` (line ~348)
-- Adjust thinking budget in API calls (currently 2000 tokens)
-- Modify simplification prompt (line ~814)
+- Edit `STATIC_SYSTEM_PROMPT` (bottom of `claude-service.ts`) for behaviour that applies to every chat; per-request context is built in `buildSystemPrompt()`
+- Model, effort mapping, turn limit and token limits are constants at the top of `claude-service.ts`
 
-**Add vector store knowledge:**
+**Add knowledge:**
 
-1. Edit `assets/vector/system-knowledge.json`
-2. Rebuild vector store (currently manual process with Claude API)
-3. Copy to `assets/vector/vector.store`
-4. Rebuild app to include in `dist/assets/`
+1. Add JSONL lines (`{"id": ..., "content": ...}`) to `assets/vector/vector.store` (the source JSON is not in the repo)
+2. Rebuild the app to include it in `dist/assets/`
 
 **Extend tool capabilities:**
-Add new tools to the `tools` array in `ClaudeService.sendMessage()`, then implement handlers in the tool use loop (line ~496).
+Add a tool with the `tool(...)` helper in `createAgentTools()` (`claude-tools.ts`). Tools return `{content, isError?}`; push an `EvidenceItem` if the lookup should show up under "Details".

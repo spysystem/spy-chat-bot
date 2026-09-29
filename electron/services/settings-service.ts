@@ -7,7 +7,6 @@ export type AiQualityProfile = 'balanced' | 'maximum_accuracy';
 export interface UserSettings {
 	userName?: string;
 	localRepoUrl?: string;
-	selectedModel?: 'claude' | 'openai';
 	aiQualityProfile?: AiQualityProfile;
 }
 
@@ -64,17 +63,6 @@ export class SettingsService {
 	async saveLocalRepoUrl(localRepoUrl: string): Promise<void> {
 		const settings        = await this.getSettings();
 		settings.localRepoUrl = localRepoUrl;
-		await this.saveSettings(settings);
-	}
-
-	async getSelectedModel(): Promise<'claude' | 'openai'> {
-		const settings = await this.getSettings();
-		return settings.selectedModel || 'claude';
-	}
-
-	async saveSelectedModel(model: 'claude' | 'openai'): Promise<void> {
-		const settings         = await this.getSettings();
-		settings.selectedModel = model;
 		await this.saveSettings(settings);
 	}
 

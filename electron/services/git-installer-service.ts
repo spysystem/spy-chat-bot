@@ -34,19 +34,6 @@ export class GitInstallerService {
 	}
 
 	/**
-	 * Get the installed Git version, or null if not installed.
-	 */
-	async getGitVersion(): Promise<string | null> {
-		try {
-			const {stdout} = await execFileAsync('git', ['--version']);
-			const match    = stdout.match(/git version ([\d.]+)/);
-			return match ? match[1] : stdout.trim();
-		} catch {
-			return null;
-		}
-	}
-
-	/**
 	 * Prompt user to install Git and handle the installation.
 	 * Returns true if Git is now available, false if user cancelled or installation failed.
 	 */

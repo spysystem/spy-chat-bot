@@ -110,11 +110,21 @@ export interface SchemaIndexStatus {
 	fallbackUsed?: boolean;
 }
 
+interface LocalRepoWorktree {
+	branch: string;
+	path: string;
+	commit?: string;
+	lastUsedIso: string;
+	lastSyncIso: string;
+}
+
 export interface LocalRepoStatus {
 	exists: boolean;
 	repoPath: string;
-	lastSyncIso?: string;
 	url?: string;
+	defaultBranch?: string;
+	lastFetchIso?: string;
+	worktrees: LocalRepoWorktree[];
 }
 
 export interface LocalRepoSyncProgress {
@@ -132,7 +142,7 @@ export interface DebugLogEntry {
 	details?: string;
 	chatId?: string;
 	runId?: string;
-	provider?: 'claude' | 'openai';
+	provider?: 'claude';
 	phase?: 'prepare' | 'retrieval' | 'technical' | 'postprocess' | 'tool' | 'stream' | 'ipc' | 'background' | 'other';
 	toolName?: string;
 	durationMs?: number;
@@ -149,7 +159,6 @@ declare global {
 			testDatabaseConnection: (config: DatabaseConfig) => Promise<{ success: boolean; error?: string }>;
 			saveDatabaseConfig: (config: DatabaseConfig) => Promise<void>;
 			getDatabaseConfigs: () => Promise<DatabaseConfig[]>;
-			deleteDatabaseConfig: (id: string) => Promise<void>;
 			getSystems: (statuses?: string[]) => Promise<SystemDirectorySystem[]>;
 			getSchemaIndexStatus: (configId: string, branch?: string) => Promise<SchemaIndexStatus>;
 			generateSchemaIndex: (configId: string, databaseName: string, branch?: string) => Promise<SchemaIndexStatus>;
@@ -159,14 +168,6 @@ declare global {
 			saveAttachment: (chatId: string, originalName: string, mimeType: string | undefined, dataBase64: string) => Promise<AttachmentMeta>;
 			getAttachmentDataUrl: (storedPath: string, mimeType: string) => Promise<string>;
 			openAttachment: (storedPath: string) => Promise<{ success: boolean; error?: string }>;
-			sendMessage: (chatId: string, message: string, databases: string[], history?: Array<{
-				role: string;
-				content: string
-			}>, chatContext?: { databaseName?: string; dbHost?: string; githubBranch?: string }, attachments?: AttachmentMeta[]) => Promise<{
-				shortAnswer: string;
-				detailedAnswer: string;
-				suggestedTitle?: string;
-			}>;
 			startAiStream: (chatId: string, message: string, databases: string[], history?: Array<{
 				role: string;
 				content: string;
@@ -189,10 +190,6 @@ declare global {
 			}) => void) => () => void;
 			getApiKey: () => Promise<string | null>;
 			saveApiKey: (apiKey: string) => Promise<void>;
-			getOpenAiApiKey: () => Promise<string | null>;
-			saveOpenAiApiKey: (apiKey: string) => Promise<void>;
-			getSelectedModel: () => Promise<'claude' | 'openai'>;
-			saveSelectedModel: (model: 'claude' | 'openai') => Promise<void>;
 			getAiQualityProfile: () => Promise<AiQualityProfile>;
 			saveAiQualityProfile: (profile: AiQualityProfile) => Promise<void>;
 			getChats: () => Promise<Chat[]>;
@@ -206,17 +203,18 @@ declare global {
 			}>, update?: ChatUpdate) => Promise<void>;
 			deleteChat: (chatId: string) => Promise<void>;
 			clearAllChats: () => Promise<void>;
-			setWorkingSummary: (chatId: string, text: string) => Promise<void>;
 			clearWorkingSummary: (chatId: string) => Promise<void>;
 			onMessageProgress: (callback: (payload: { chatId: string; streamId: string; status: string } | string) => void) => () => void;
 			getGitHubConfig: () => Promise<GitHubConfig | null>;
 			saveGitHubConfig: (config: GitHubConfig) => Promise<void>;
 			validateGitHubConfig: () => Promise<{ valid: boolean; error?: string; user?: string }>;
+			getSentryConfig: () => Promise<{ hasToken: boolean; orgSlug: string; baseUrl: string }>;
+			saveSentryConfig: (config: { token?: string; orgSlug?: string; baseUrl?: string }) => Promise<void>;
+			validateSentryConfig: () => Promise<{ valid: boolean; error?: string; organization?: string }>;
 			getLocalRepoStatus: () => Promise<LocalRepoStatus>;
 			syncLocalRepo: (url: string) => Promise<{ success: boolean; repoPath?: string; error?: string }>;
+			listRepoBranches: () => Promise<string[]>;
 			onLocalRepoSyncProgress: (callback: (progress: LocalRepoSyncProgress) => void) => () => void;
-			checkGitInstalled: () => Promise<{ installed: boolean; version: string | null }>;
-			installGit: () => Promise<{ success: boolean }>;
 			getUserName: () => Promise<string | null>;
 			saveUserName: (userName: string) => Promise<void>;
 			openDebugWindow: () => Promise<void>;

@@ -19,7 +19,7 @@ export interface SystemDirectorySystem {
 	allowDatabaseDelete?: boolean;
 }
 
-export interface SystemDirectoryResponse {
+interface SystemDirectoryResponse {
 	status: number;
 	message?: string;
 	error_code?: number;

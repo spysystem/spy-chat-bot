@@ -1,13 +1,14 @@
+import type Anthropic from '@anthropic-ai/sdk';
 import {app} from 'electron';
 import * as fs from 'fs/promises';
 import path from 'path';
-import {z} from 'zod';
 import type {DatabaseService} from './database-service';
 import type {GitHubService} from './github-service';
-import type {SchemaIndexService} from './schema-index-service';
-import type {SpyCodeAiMcpService} from './spy-code-ai-mcp-service';
-import {addAnswerEvidence} from './shared/answer-quality';
-import type {AnswerEvidenceItem} from './shared/answer-quality';
+import type {KnowledgeService} from './knowledge-service';
+import type {CommitSummary} from './local-repo-service';
+import type {SchemaIndexFileV1, SchemaIndexService} from './schema-index-service';
+import type {SentryService} from './sentry-service';
+import type {SpyCodeAiMcpService, SpySearchCodeArgs} from './spy-code-ai-mcp-service';
 
 export type DebugLogFn = (
 	type: 'query' | 'tool' | 'api' | 'error' | 'info',
@@ -16,1125 +17,788 @@ export type DebugLogFn = (
 	details?: string,
 ) => void;
 
-export interface ClaudeToolOptions {
+/** What the agent looked at, shown under "Details" and fed to the working summary. */
+export interface EvidenceItem {
+	kind: 'sql' | 'schema' | 'code_search' | 'file' | 'history' | 'csv' | 'knowledge' | 'mcp' | 'sentry';
+	label: string;
+	detail?: string;
+}
+
+interface ClarificationRequest {
+	question: string;
+	options?: string[];
+	allowFreeText: boolean;
+}
+
+export interface ToolContext {
 	databaseService: DatabaseService;
 	githubService: GitHubService;
 	schemaIndexService: SchemaIndexService;
 	spyCodeAiMcpService: SpyCodeAiMcpService;
+	knowledgeService: KnowledgeService;
+	sentryService: SentryService;
+	systemKey?: string;
 	databaseIds: string[];
 	databaseName?: string;
 	dbHostOverride?: string;
-	githubBranchOverride?: string;
+	branch?: string;
 	onProgress?: (status: string) => void;
 	onDebugLog?: DebugLogFn;
-	queryResults: Array<{ query: string; data: any[] }>;
-	evidenceItems?: AnswerEvidenceItem[];
-	toolUsageStats?: {
-		codeSearches: number;
-		contextSearches: number;
-		fileReads: number;
-		fileSectionReads: number;
+	evidence: EvidenceItem[];
+}
+
+export interface ToolRunResult {
+	content: string;
+	isError?: boolean;
+	clarification?: ClarificationRequest;
+}
+
+interface AgentTool {
+	definition: Anthropic.Tool;
+	run: (input: Record<string, unknown>) => Promise<ToolRunResult>;
+}
+
+export interface AgentToolset {
+	tools: AgentTool[];
+	capabilities: {
+		database: boolean;
+		schemaIndex: boolean;
+		localCode: boolean;
+		remoteCode: boolean;
+		spyCodeAi: boolean;
+		sentry: boolean;
 	};
 }
 
-export interface ClaudeToolsResult {
-	tools: any[];
-	hasGitHub: boolean;
-	resetSearchCounter: () => void;
+type DbConfig = { id: string; name: string; host: string };
+
+const MAX_TOOL_RESULT_CHARS = 60_000;
+const MAX_QUERY_ROWS        = 200;
+const MAX_CELL_CHARS        = 300;
+const MAX_FILE_LINES        = 1500;
+
+class ToolInputError extends Error {
 }
 
-type DbConfig = { id: string; name: string; host: string; database?: string };
-const LOCAL_CODE_SEARCH_SOFT_LIMIT  = 40;
-const REMOTE_CODE_SEARCH_SOFT_LIMIT = 15;
-
-export async function runWithConcurrency<T>(
-	items: T[],
-	concurrency: number,
-	worker: (item: T, index: number) => Promise<void>,
-): Promise<void> {
-	if (items.length === 0) {
-		return;
-	}
-	const limit   = Math.max(1, concurrency);
-	let cursor    = 0;
-	const runners = Array.from({length: Math.min(limit, items.length)}, async () => {
-		while (cursor < items.length) {
-			const index = cursor++;
-			// eslint-disable-next-line no-await-in-loop
-			await worker(items[index], index);
+function str(input: Record<string, unknown>, key: string, required: true): string;
+function str(input: Record<string, unknown>, key: string, required?: false): string | undefined;
+function str(input: Record<string, unknown>, key: string, required = false): string | undefined {
+	const value = input[key];
+	if (value === undefined || value === null || value === '') {
+		if (required) {
+			throw new ToolInputError(`Missing required parameter "${key}"`);
 		}
-	});
-	await Promise.all(runners);
-}
-
-export function truncateLargeToolResult(
-	result: unknown,
-	maxRows: number  = 100,
-	maxLines: number = 500,
-): { truncated: boolean; data: unknown } {
-	const queryResult = result as { rows?: any[]; rowCount?: number; [key: string]: any };
-
-	if (queryResult.rows && Array.isArray(queryResult.rows)) {
-		const totalRows = queryResult.rows.length;
-		if (totalRows > maxRows) {
-			return {
-				truncated: true,
-				data     : {
-					...queryResult,
-					rows             : queryResult.rows.slice(0, maxRows),
-					originalRowCount : totalRows,
-					truncatedRowCount: maxRows,
-					truncationNote   : `Result truncated: showing first ${maxRows} of ${totalRows} rows. Use LIMIT in your query to control output size.`,
-				},
-			};
-		}
+		return undefined;
 	}
-
-	if (typeof result === 'string' && result.includes('\n')) {
-		const lines = result.split('\n');
-		if (lines.length > maxLines) {
-			const truncatedContent = lines.slice(0, maxLines).join('\n');
-			const remainingLines   = lines.length - maxLines;
-			const guidanceMessage  = `
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-FILE TRUNCATED - ${remainingLines} MORE LINES NOT SHOWN
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Total lines in file: ${lines.length}
-Lines shown: ${maxLines}
-Lines omitted: ${remainingLines}
-
-TO ACCESS THE REST OF THE FILE:
-
-1. Use the 'search_code' tool to find specific functions, classes, or methods you need.
-   Example: search_code("function generateEanExcel")
-   Example: search_code("class POrder")
-
-2. Search for specific keywords or patterns that appear in the code you're looking for.
-   Example: search_code("Size column Excel")
-
-3. If you need a specific section, ask the user to search for it in their local codebase
-   and paste the relevant code snippet.
-
-This truncation prevents token limit errors. Use targeted searches instead of reading entire large files.
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
-
-			return {
-				truncated: true,
-				data     : truncatedContent + guidanceMessage,
-			};
-		}
-	}
-
-	if (Array.isArray(result)) {
-		const maxResults = 10;
-		if (result.length > maxResults) {
-			return {
-				truncated: true,
-				data     : [
-					...result.slice(0, maxResults),
-					{
-						truncationNote: `Search results truncated: showing first ${maxResults} of ${result.length} results. Refine your search query for more specific results.`,
-					},
-				],
-			};
-		}
-	}
-
-	return {truncated: false, data: result};
-}
-
-export function formatQueryDebugPreview(
-	result: unknown,
-	maxPreviewRows: number = 3,
-): string {
-	const queryResult = result as { rows?: any[]; rowCount?: number; [key: string]: any };
-	const rows        = Array.isArray(queryResult.rows) ? queryResult.rows : [];
-	const rowCount    = typeof queryResult.rowCount === 'number' ? queryResult.rowCount : rows.length;
-	if (rows.length === 0) {
-		return `Rows returned: ${rowCount}\nPreview: (empty result set)`;
-	}
-
-	const firstRow = rows[0] && typeof rows[0] === 'object' ? rows[0] : null;
-	const columns  = firstRow ? Object.keys(firstRow) : [];
-	const preview  = rows.slice(0, Math.max(1, maxPreviewRows));
-
-	return [
-		`Rows returned: ${rowCount}`,
-		columns.length > 0 ? `Columns: ${columns.join(', ')}` : 'Columns: (unknown)',
-		'Preview:',
-		JSON.stringify(preview, null, 2),
-	].join('\n');
-}
-
-function getCodeSearchSoftLimit(hasLocalRepo: boolean): number {
-	return hasLocalRepo ? LOCAL_CODE_SEARCH_SOFT_LIMIT : REMOTE_CODE_SEARCH_SOFT_LIMIT;
-}
-
-function getCodeSearchSoftLimitMessage(codeSearchCallCount: number, softLimit: number, hasLocalRepo: boolean): string {
-	if (hasLocalRepo) {
-		return `Code search #${codeSearchCallCount} in this run (local soft limit ${softLimit}). Local ripgrep is usually fine, but prefer read_file/read_file_section once the target file is known.`;
-	}
-
-	return `Code search #${codeSearchCallCount} (over soft limit of ${softLimit}). Consider using read_file instead.`;
-}
-
-const sqlKeywordSet = new Set([
-	'SELECT', 'FROM', 'WHERE', 'JOIN', 'LEFT', 'RIGHT', 'INNER', 'OUTER', 'ON',
-	'GROUP', 'BY', 'ORDER', 'LIMIT', 'HAVING', 'AS', 'DISTINCT',
-	'COUNT', 'SUM', 'AVG', 'MIN', 'MAX',
-	'CASE', 'WHEN', 'THEN', 'ELSE', 'END',
-	'AND', 'OR', 'NOT', 'IN', 'IS', 'NULL', 'LIKE', 'BETWEEN', 'EXISTS',
-	'UNION', 'ALL',
-	'DESC', 'ASC',
-	'TRUE', 'FALSE',
-]);
-
-function extractTableNames(sql: string): string[] {
-	const names: string[] = [];
-	const re              = /\b(?:FROM|JOIN)\s+`?([a-zA-Z0-9_]+)`?/gi;
-	let m: RegExpExecArray | null;
-	while ((m = re.exec(sql)) !== null) {
-		if (m[1]) {
-			names.push(m[1]);
-		}
-	}
-	return Array.from(new Set(names));
-}
-
-function extractPossibleColumnNamesSingleTable(sql: string): string[] {
-	// Extract column names from entire SQL, not just WHERE clause
-	// This catches columns in SELECT, CASE WHEN, WHERE, ORDER BY, GROUP BY, etc.
-
-	// Remove string literals to avoid false matches
-	let cleanSql = sql
-		.replace(/'[^']*'/g, ' ')
-		.replace(/"[^"]*"/g, ' ');
-
-	// Remove AS aliases (the word after AS is not a column)
-	cleanSql = cleanSql.replace(/\bAS\s+[a-zA-Z_][a-zA-Z0-9_]*/gi, ' ');
-
-	// Find all potential identifiers
-	const tokens = cleanSql
-		.match(/[a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)?|`[a-zA-Z0-9_]+`(?:\.`[a-zA-Z0-9_]+`)?/g) || [];
-
-	const out: string[] = [];
-	for (const raw of tokens) {
-		const cleanedRaw = raw.replace(/`/g, '');
-		const parts      = cleanedRaw.split('.');
-		const ident      = parts.length === 2 ? parts[1] : parts[0];
-		if (!ident) {
-			continue;
-		}
-		const upper = ident.toUpperCase();
-		if (sqlKeywordSet.has(upper)) {
-			continue;
-		}
-		// Skip common SQL functions
-		if (['COUNT', 'SUM', 'AVG', 'MAX', 'MIN', 'COALESCE', 'IFNULL', 'IF', 'CONCAT', 'LENGTH', 'SUBSTRING', 'TRIM', 'UPPER', 'LOWER', 'DATE', 'NOW', 'YEAR', 'MONTH', 'DAY'].includes(upper)) {
-			continue;
-		}
-		if (ident.length <= 1) {
-			continue;
-		}
-		out.push(ident);
-	}
-	return Array.from(new Set(out));
-}
-
-function suggestColumnsFromTable(
-	table: { tableName: string; columns: Array<{ columnName: string }> },
-	needle: string,
-	limit: number = 10,
-): Array<{ tableName: string; columnName: string }> {
-	const needleLower                                                   = needle.toLowerCase();
-	const suggestions: Array<{ tableName: string; columnName: string }> = [];
-	const tryNeedles                                                    = Array.from(new Set([
-		needleLower,
-		...needleLower.split('_').filter((p) => p.length >= 3),
-	]));
-
-	for (const n of tryNeedles) {
-		for (const c of table.columns) {
-			if (c.columnName.toLowerCase().includes(n)) {
-				suggestions.push({tableName: table.tableName, columnName: c.columnName});
-				if (suggestions.length >= limit) {
-					return suggestions;
-				}
-			}
-		}
-	}
-	return suggestions;
-}
-
-export async function preflightQueryAgainstSchemaIndex(
-	schemaIndexService: SchemaIndexService,
-	configId: string,
-	sql: string,
-	options?: { branch?: string; fallbackBranches?: string[] },
-): Promise<{ ok: boolean; error?: string; hints?: any }> {
-	const index = await schemaIndexService.loadIndex(configId, options);
-	if (!index) {
-		return {ok: true};
-	}
-
-	const tables = extractTableNames(sql);
-	if (tables.length === 0) {
-		return {ok: true};
-	}
-
-	const missingTables = tables.filter((t) => !schemaIndexService.getTable(index, t));
-	if (missingTables.length > 0) {
-		return {
-			ok   : false,
-			error: `TABLE(S) DO NOT EXIST: ${missingTables.join(', ')}. You MUST use search_schema to find the correct table name. NEVER guess table names.`,
-			hints: {
-				unknownTable: missingTables.map((t) => ({
-					requested  : t,
-					suggestions: schemaIndexService.searchSchema(index, t, 10),
-				})),
-				action      : 'Call search_schema with a keyword from the table name to find the correct table. Example: search_schema("shipping") or search_schema("order")',
-			},
-		};
-	}
-
-	const hasJoin = /\bJOIN\b/i.test(sql);
-	if (tables.length === 1 && !hasJoin) {
-		const table = schemaIndexService.getTable(index, tables[0]);
-		if (table) {
-			const columnSet  = new Set(table.columns.map((c) => c.columnName.toLowerCase()));
-			const candidates = extractPossibleColumnNamesSingleTable(sql)
-				.filter((c) => c.toLowerCase() !== table.tableName.toLowerCase());
-
-			const missingCols = candidates.filter((c) => !columnSet.has(c.toLowerCase()));
-			if (missingCols.length > 0) {
-				const suggestions: Array<{ requested: string; suggestions: Array<{ tableName: string; columnName: string }> }> = [];
-				for (const col of missingCols.slice(0, 5)) {
-					const s = suggestColumnsFromTable(table, col, 10);
-					suggestions.push({requested: col, suggestions: s});
-				}
-
-				return {
-					ok   : false,
-					error: `Schema index: potential unknown column(s) in ${table.tableName}`,
-					hints: {
-						table         : table.tableName,
-						missingColumns: missingCols.slice(0, 10),
-						suggestions,
-						note          : 'If these are aliases (AS ...), qualify columns or rename aliases. Otherwise, use get_table_schema_cached to verify exact column names.',
-					},
-				};
-			}
-		}
-	}
-
-	return {ok: true};
-}
-
-export async function exportToCsvFile(filename: string, data: Array<Record<string, unknown>>): Promise<Record<string, unknown>> {
-	if (data.length === 0) {
-		return {error: 'No data to export'};
-	}
-
-	const headers           = Object.keys(data[0]);
-	const csvRows: string[] = [];
-	csvRows.push(headers.map((h) => escapeCsvValue(h)).join(','));
-	for (const row of data) {
-		const values = headers.map((h) => escapeCsvValue(String(row[h] ?? '')));
-		csvRows.push(values.join(','));
-	}
-
-	const csvContent   = csvRows.join('\n');
-	const downloadsDir = app.getPath('downloads');
-	const filePath     = path.join(downloadsDir, filename);
-	await fs.writeFile(filePath, csvContent, 'utf-8');
-
-	return {
-		success : true,
-		filePath,
-		rowCount: data.length,
-		message : `CSV file saved to Downloads folder: ${filename}`,
-	};
-}
-
-function escapeCsvValue(value: string): string {
-	if (value.includes(',') || value.includes('"') || value.includes('\n')) {
-		return `"${value.replace(/"/g, '""')}"`;
+	if (typeof value !== 'string') {
+		throw new ToolInputError(`Parameter "${key}" must be a string`);
 	}
 	return value;
 }
 
-export async function createClaudeTools(options: ClaudeToolOptions): Promise<ClaudeToolsResult> {
-	const {toolDefinition} = await import('@tanstack/ai');
+function int(input: Record<string, unknown>, key: string, min: number, max: number): number | undefined {
+	const value = input[key];
+	if (value === undefined || value === null) {
+		return undefined;
+	}
+	const parsed = typeof value === 'number' ? value : Number(value);
+	if (!Number.isFinite(parsed)) {
+		throw new ToolInputError(`Parameter "${key}" must be a number`);
+	}
+	return Math.min(max, Math.max(min, Math.floor(parsed)));
+}
 
-	const queryDatabaseDef = toolDefinition({
-		name        : 'query_database',
-		description : 'Execute a READ-ONLY SQL query. MANDATORY: Before using this tool, you MUST call search_schema to find the correct table name AND get_table_schema_cached to verify exact column names. NEVER guess table or column names — queries with wrong names will be rejected.',
-		inputSchema : z.object({
-			dbId : z.string().describe('Database connection ID from the available connections'),
-			query: z.string().describe('SELECT/SHOW/DESCRIBE/EXPLAIN query using ONLY verified table and column names from search_schema + get_table_schema_cached. Always use LIMIT for large result sets.'),
-		}),
-		outputSchema: z.any(),
-	});
+function bool(input: Record<string, unknown>, key: string): boolean | undefined {
+	const value = input[key];
+	return typeof value === 'boolean' ? value : undefined;
+}
 
-	const listTablesDef = toolDefinition({
-		name        : 'list_tables',
-		description : 'List all tables for a database.',
-		inputSchema : z.object({
-			dbId: z.string(),
-		}),
-		outputSchema: z.array(z.string()),
-	});
+function capText(text: string, limit: number = MAX_TOOL_RESULT_CHARS): string {
+	if (text.length <= limit) {
+		return text;
+	}
+	return `${text.slice(0, limit)}\n\n[Output truncated at ${limit} characters - narrow the request to see the rest.]`;
+}
 
-	const describeTableDef = toolDefinition({
-		name        : 'describe_table',
-		description : 'Get schema information for a table in a database.',
-		inputSchema : z.object({
-			dbId      : z.string(),
-			table_name: z.string(),
-		}),
-		outputSchema: z.any(),
-	});
+function toJson(value: unknown): string {
+	return capText(typeof value === 'string' ? value : JSON.stringify(value, null, 1));
+}
 
-	const searchSchemaDef = toolDefinition({
-		name        : 'search_schema',
-		description : 'Find table names by keyword. Use FIRST when you need to find which table contains certain data (e.g., search "order" to find order-related tables, search "customer" to find customer tables).',
-		inputSchema : z.object({
-			dbId : z.string(),
-			query: z.string().describe('Keyword to search for (e.g., "order", "customer", "invoice", "return")'),
-			limit: z.number().optional(),
-		}),
-		outputSchema: z.any(),
-	});
+function formatCell(value: unknown): string {
+	if (value === null || value === undefined) {
+		return 'NULL';
+	}
+	let text: string;
+	if (value instanceof Date) {
+		text = value.toISOString();
+	} else if (Buffer.isBuffer(value)) {
+		text = `<binary ${value.length} bytes>`;
+	} else if (typeof value === 'object') {
+		text = JSON.stringify(value);
+	} else {
+		text = String(value);
+	}
+	text = text.replace(/\t/g, ' ').replace(/\r?\n/g, '\\n');
+	return text.length > MAX_CELL_CHARS ? `${text.slice(0, MAX_CELL_CHARS)}…` : text;
+}
 
-	const getTableSchemaCachedDef = toolDefinition({
-		name        : 'get_table_schema_cached',
-		description : 'REQUIRED before query_database! Get exact column names for a table from the schema index. Returns all columns with their types. Use this to verify column names before writing any SQL query.',
-		inputSchema : z.object({
-			dbId      : z.string(),
-			table_name: z.string().describe('Exact table name (e.g., "customers", "orders", "order_lines")'),
-		}),
-		outputSchema: z.any(),
-	});
+function formatRows(columns: string[], rows: Array<Record<string, unknown>>, maxRows: number): string {
+	if (rows.length === 0) {
+		return 'Query returned 0 rows.';
+	}
+	const cols  = columns.length > 0 ? columns : Object.keys(rows[0]);
+	const shown = rows.slice(0, maxRows);
+	const lines = [cols.join('\t'), ...shown.map((row) => cols.map((c) => formatCell(row[c])).join('\t'))];
+	const note  = rows.length > shown.length
+		? `\n\n[Showing ${shown.length} of ${rows.length} rows. Use aggregation, filters or LIMIT to narrow the result, or export_to_csv for the full list.]`
+		: `\n\n(${rows.length} row${rows.length === 1 ? '' : 's'})`;
+	return capText(lines.join('\n') + note);
+}
 
-	const exportToCsvDef = toolDefinition({
-		name        : 'export_to_csv',
-		description : 'Export query results to a CSV file in the Downloads folder.',
-		inputSchema : z.object({
-			dbId    : z.string(),
-			query   : z.string(),
-			filename: z.string(),
-		}),
-		outputSchema: z.any(),
-	});
+function numberLines(content: string, startLine: number): string {
+	return content.split('\n').map((line, index) => `${startLine + index}\t${line}`).join('\n');
+}
 
-	const searchCodeDef = toolDefinition({
-		name        : 'search_code',
-		description : 'Search repository code. USE THIS for "how does X work", UI navigation, feature logic, error causes. Do NOT use for data lookups (use query_database instead). Supports path: or file: prefixes.',
-		inputSchema : z.object({
-			query: z.string().describe('Search query. Supports path:folder or file:name.php prefixes to narrow scope.'),
-		}),
-		outputSchema: z.any(),
-	});
+function csvValue(value: unknown): string {
+	if (value === null || value === undefined) {
+		return '';
+	}
+	const text = value instanceof Date ? value.toISOString() : typeof value === 'object' && !Buffer.isBuffer(value) ? JSON.stringify(value) : String(value);
+	return /[",\n\r;]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
 
-	const searchCodeContextDef = toolDefinition({
-		name        : 'search_code_context',
-		description : 'PREFERRED for understanding code. Returns actual source snippets with line numbers. Use for "how to", "where is the setting", understanding feature logic. Do NOT use for data lookups.',
-		inputSchema : z.object({
-			query        : z.string().describe('Search query. Supports path:folder or file:name.php prefixes to narrow scope.'),
-			max_files    : z.number().int().min(1).max(5).optional().describe('Max files to return snippets from (default: 3)'),
-			context_lines: z.number().int().min(5).max(120).optional().describe('Lines of context around each match (default: 40)'),
-		}),
-		outputSchema: z.any(),
-	});
+async function exportToCsvFile(baseName: string, rows: Array<Record<string, unknown>>, columns: string[]): Promise<{
+	filePath: string;
+	rowCount: number
+}> {
+	const safeBase = baseName.replace(/\.csv$/i, '').replace(/[^\p{L}\p{N}._ -]/gu, '_').replace(/^[.\s]+/, '').slice(0, 80) || 'export';
+	const now      = new Date();
+	const stamp    = `${now.toISOString().slice(0, 10)}_${now.toTimeString().slice(0, 8).replace(/:/g, '-')}`;
+	const filePath = path.join(app.getPath('downloads'), `${safeBase}_${stamp}.csv`);
+	const cols     = columns.length > 0 ? columns : Object.keys(rows[0] ?? {});
+	const lines    = [cols.map(csvValue).join(','), ...rows.map((row) => cols.map((c) => csvValue(row[c])).join(','))];
+	// BOM so Excel opens UTF-8 (æ, ø, å) correctly.
+	await fs.writeFile(filePath, '﻿' + lines.join('\r\n'), 'utf-8');
+	return {filePath, rowCount: rows.length};
+}
 
-	const spySearchCodeDef = toolDefinition({
-		name        : 'spy_search_code',
-		description : 'Search indexed SPY code by semantic or symbolic query. Use for broad SPY monolith lookup, then verify important claims with read_file or read_file_section when direct file access is available.',
-		inputSchema : z.object({
-			query     : z.string().describe('What to search for in indexed SPY code'),
-			kind      : z.enum(['entity_field', 'class', 'method', 'sql_query', 'route', 'relation', 'ts_file', 'view', 'api_endpoint']).optional(),
-			limit     : z.number().int().min(1).max(50).optional(),
-			match_mode: z.enum(['auto', 'semantic', 'symbolic', 'hybrid']).optional(),
-		}),
-		outputSchema: z.any(),
-	});
-
-	const spySearchContextDef = toolDefinition({
-		name        : 'spy_search_context',
-		description : 'Retrieve indexed SPY implementation context grouped by data, logic, API, UI, and relationships. Use for feature overviews and flow discovery.',
-		inputSchema : z.object({
-			query: z.string().describe('Natural language description of the feature area'),
-			limit: z.number().int().min(1).max(50).optional(),
-		}),
-		outputSchema: z.any(),
-	});
-
-	const readFileDef = toolDefinition({
-		name        : 'read_file',
-		description : 'Read an ENTIRE file from the repository. WARNING: For large files (1000+ lines), prefer read_file_section with specific line ranges instead. Use this only for small files or when you need the complete file.',
-		inputSchema : z.object({
-			file_path: z.string().describe('Path to the file in the repository'),
-		}),
-		outputSchema: z.any(),
-	});
-
-	const listFilesDef = toolDefinition({
-		name        : 'list_files',
-		description : 'List files in a directory in the configured GitHub repository.',
-		inputSchema : z.object({
-			directory_path: z.string(),
-		}),
-		outputSchema: z.any(),
-	});
-
-	const getRepositoryStructureDef = toolDefinition({
-		name        : 'get_repository_structure',
-		description : 'Get the complete file tree structure of the configured GitHub repository.',
-		inputSchema : z.object({}),
-		outputSchema: z.any(),
-	});
-
-	const askClarifyingQuestionDef = toolDefinition({
-		name        : 'ask_clarifying_question',
-		description : 'Ask the user a clarifying question to give a better answer. Use freely when context would help (which system, online vs POS, new vs existing, scope of question). Provide 2-4 clickable options when possible. Do NOT use for info you can find via search_code or query_database.',
-		inputSchema : z.object({
-			question     : z.string().describe('The clarifying question in the user\'s language'),
-			options      : z.array(z.string()).optional().describe('2-4 suggested answers the user can click (e.g. ["Online shop", "POS terminal", "Both"])'),
-			allowFreeText: z.boolean().optional().describe('If true, show a text field for custom input. Default: true'),
-		}),
-		outputSchema: z.any(),
-	});
-
-	const {
-			  databaseService,
-			  githubService,
-			  schemaIndexService,
-			  spyCodeAiMcpService,
-			  databaseIds,
-			  databaseName,
-			  dbHostOverride,
-			  githubBranchOverride,
-			  onProgress,
-			  onDebugLog,
-			  queryResults,
-			  evidenceItems,
-			  toolUsageStats,
-		  } = options;
-
-	const configs          = await databaseService.getConfigs();
-	const dbConfigs        = configs.filter((c) => databaseIds.includes(c.id)) as DbConfig[];
-	const dbConfigById     = new Map(dbConfigs.map((c) => [c.id, c]));
-	const allowedDbDisplay = dbConfigs
-		.map((c) => `${c.name} (id: ${c.id})`)
-		.join(', ');
-
-	const githubConfig             = await githubService.getConfig();
-	const localRepoUrl             = githubService.getLocalRepoUrl();
-	const hasGitHub                = !!githubConfig || !!localRepoUrl;
-	const hasSpyCodeAi             = await spyCodeAiMcpService.isConfigured();
-	const schemaBranch             = githubBranchOverride?.trim() || githubConfig?.branch?.trim() || undefined;
-	const effectiveGitHubBranch    = githubBranchOverride?.trim() || githubConfig?.branch?.trim() || 'main';
-	const schemaIndexLookupOptions = {
-		branch          : schemaBranch,
-		fallbackBranches: githubConfig?.branch ? [githubConfig.branch] : [],
+function tool(
+	name: string,
+	description: string,
+	properties: Record<string, unknown>,
+	required: string[],
+	run: AgentTool['run'],
+): AgentTool {
+	return {
+		definition: {
+			name,
+			description,
+			input_schema: {type: 'object', properties, required},
+		},
+		run,
 	};
-	if (githubConfig) {
-		const branchSource = githubBranchOverride?.trim()
-			? `chat override; default: ${githubConfig.branch}`
-			: 'default config';
-		console.log('[ClaudeService] GitHub repo:', `${githubConfig.owner}/${githubConfig.repo}@${effectiveGitHubBranch} (${branchSource})`);
-	}
-	if (localRepoUrl) {
-		console.log('[ClaudeService] Local repo URL:', localRepoUrl);
-	}
+}
 
-	const tools: Array<any> = [];
-	let codeSearchCallCount = 0;
+export async function createAgentTools(ctx: ToolContext): Promise<AgentToolset> {
+	const {
+			  databaseService, githubService, schemaIndexService, spyCodeAiMcpService, knowledgeService, sentryService, systemKey,
+			  databaseIds, databaseName, dbHostOverride, branch, onProgress, onDebugLog, evidence,
+		  } = ctx;
 
-	if (databaseName && databaseIds.length > 0) {
-		const ensureDbConfig = (dbId: string): DbConfig | null => {
-			const config = dbConfigById.get(dbId);
-			return config || null;
-		};
+	const configs            = await databaseService.getConfigs();
+	const dbConfigs          = configs.filter((c) => databaseIds.includes(c.id)) as DbConfig[];
+	const hasDatabase        = !!databaseName && dbConfigs.length > 0;
+	const githubConfig       = await githubService.getConfig();
+	const localRepoUrl       = githubService.getLocalRepoUrl();
+	const hasRemote          = !localRepoUrl && !!githubConfig?.token && !!githubConfig?.owner && !!githubConfig?.repo;
+	const hasSpyCodeAi       = await spyCodeAiMcpService.isConfigured();
+	const hasSentry          = await sentryService.isConfigured();
+	const tools: AgentTool[] = [];
 
-		// ============================================================
-		// SCHEMA TOOLS FIRST - LLMs tend to use tools that appear first
-		// ============================================================
+	const schemaIndexes   = new Map<string, SchemaIndexFileV1 | null>();
+	const loadSchemaIndex = async (configId: string): Promise<SchemaIndexFileV1 | null> => {
+		if (!schemaIndexes.has(configId)) {
+			const index = await schemaIndexService.loadIndex(configId, {
+				branch          : branch,
+				fallbackBranches: githubConfig?.branch ? [githubConfig.branch] : [],
+			}).catch(() => null);
+			schemaIndexes.set(configId, index);
+		}
+		return schemaIndexes.get(configId) ?? null;
+	};
+	const hasSchemaIndex  = hasDatabase && !!(await loadSchemaIndex(dbConfigs[0].id));
 
-		// 1. get_table_schema_cached - MOST IMPORTANT, must be called before query_database
-		tools.push(getTableSchemaCachedDef.server(async (args) => {
-			const {dbId, table_name} = args as { dbId: string; table_name: string };
-			const config             = ensureDbConfig(dbId);
-			if (!config) {
-				return {error: `Database not available for this chat: ${dbId}. Allowed: ${allowedDbDisplay}`};
+	const resolveDb    = (input: Record<string, unknown>): DbConfig => {
+		const requested = str(input, 'db_id');
+		if (!requested) {
+			return dbConfigs[0];
+		}
+		const config = dbConfigs.find((c) => c.id === requested || c.name === requested);
+		if (!config) {
+			throw new ToolInputError(`Unknown db_id "${requested}". Available: ${dbConfigs.map((c) => `${c.name} (${c.id})`).join(', ')}`);
+		}
+		return config;
+	};
+	const dbIdProperty = dbConfigs.length > 1
+		? {
+			db_id: {
+				type       : 'string',
+				description: `Connection to use. One of: ${dbConfigs.map((c) => `${c.id} (${c.name})`).join(', ')}. Defaults to the first.`,
+			},
+		}
+		: {};
+
+	const searchSchemaIndex = (index: SchemaIndexFileV1, query: string, limit: number) => {
+		// The index search matches one needle; score each word separately so
+		// "shopify order" finds tables matching either.
+		const words  = query.split(/\s+/).map((w) => w.trim()).filter((w) => w.length >= 2);
+		const merged = new Map<string, { score: number; matchingColumns: Set<string> }>();
+		for (const word of words.length > 0 ? words : [query]) {
+			for (const hit of schemaIndexService.searchSchema(index, word, 50)) {
+				const entry = merged.get(hit.tableName) ?? {score: 0, matchingColumns: new Set<string>()};
+				entry.score += hit.score;
+				hit.matchingColumns.forEach((c) => entry.matchingColumns.add(c));
+				merged.set(hit.tableName, entry);
 			}
-			if (!databaseName) {
-				return {error: 'Database name must be provided'};
-			}
+		}
+		return Array.from(merged.entries())
+			.sort((a, b) => b[1].score - a[1].score)
+			.slice(0, limit)
+			.map(([table, entry]) => ({table, matchingColumns: Array.from(entry.matchingColumns).slice(0, 12)}));
+	};
 
-			const tableName = table_name;
-			onProgress?.(`Reading schema index: ${tableName}`);
-			onDebugLog?.('tool', 'Schema Index', `Reading cached schema for: ${tableName}`, 'Tool: get_table_schema_cached');
+	// ── Database ─────────────────────────────────────────────────────────────
+	if (hasDatabase) {
+		tools.push(tool(
+			'search_schema',
+			'Find database tables whose table or column names match keywords (English, as used in the schema, e.g. "shopify order", "consignment", "return"). Returns table names with the matching columns.',
+			{
+				query: {type: 'string', description: 'One or more keywords'},
+				limit: {type: 'integer', description: 'Max tables to return (default 15)'},
+				...dbIdProperty,
+			},
+			['query'],
+			async (input) => {
+				const db    = resolveDb(input);
+				const query = str(input, 'query', true);
+				const limit = int(input, 'limit', 1, 50) ?? 15;
+				onProgress?.(`Searching schema: ${query}`);
+				const index = await loadSchemaIndex(db.id);
+				if (index) {
+					const matches = searchSchemaIndex(index, query, limit);
+					evidence.push({kind: 'schema', label: `search_schema "${query}"`, detail: `${matches.length} tables`});
+					return {content: matches.length > 0 ? toJson(matches) : `No tables match "${query}". Try other or shorter keywords.`};
+				}
+				// No index: fall back to table names from the live database.
+				const tables  = await databaseService.listTables(db.id, databaseName, dbHostOverride);
+				const words   = query.toLowerCase().split(/\s+/).filter(Boolean);
+				const matches = tables.filter((t) => words.some((w) => t.toLowerCase().includes(w))).slice(0, limit);
+				evidence.push({kind: 'schema', label: `search_schema "${query}"`, detail: `${matches.length} tables (live)`});
+				return {content: matches.length > 0 ? toJson(matches) : `No table names contain "${query}".`};
+			},
+		));
 
-			const index = await schemaIndexService.loadIndex(config.id, schemaIndexLookupOptions);
-			if (!index) {
-				return {
-					exists : false,
-					message: schemaBranch
-						? `No local schema index found for branch "${schemaBranch}". Generate it in Settings → Database Connection → Database Schema Index, or rely on the fallback/global index.`
-						: 'No local schema index found. Generate it in Settings → Database Connection → Database Schema Index.',
-					databaseName,
-				};
-			}
+		tools.push(tool(
+			'describe_table',
+			'Get the columns (name and type), primary key and foreign keys of a table. Check this before writing SQL against a table you have not described in this conversation.',
+			{
+				table: {type: 'string', description: 'Exact table name'},
+				...dbIdProperty,
+			},
+			['table'],
+			async (input) => {
+				const db    = resolveDb(input);
+				const table = str(input, 'table', true);
+				if (!/^[A-Za-z0-9_$]+$/.test(table)) {
+					throw new ToolInputError('Table name may only contain letters, digits, _ and $');
+				}
+				onProgress?.(`Reading table structure: ${table}`);
+				const index = await loadSchemaIndex(db.id);
+				const entry = index ? schemaIndexService.getTable(index, table) : null;
+				evidence.push({kind: 'schema', label: `describe_table ${table}`});
+				if (entry) {
+					return {
+						content: toJson({
+							table      : entry.tableName,
+							primaryKey : entry.primaryKey,
+							foreignKeys: entry.foreignKeys.map((fk) => `${fk.columnName} -> ${fk.referencedTable}.${fk.referencedColumn}`),
+							columns    : entry.columns.map((c) => `${c.columnName} ${c.columnType || c.dataType || ''}${c.columnComment ? ` -- ${c.columnComment}` : ''}`.trim()),
+						}),
+					};
+				}
+				const result = await databaseService.getTableSchema(db.id, table, databaseName, dbHostOverride);
+				return {content: formatRows(result.columns, result.rows, 500)};
+			},
+		));
 
-			const table = schemaIndexService.getTable(index, tableName);
-			if (!table) {
-				return {
-					exists        : true,
-					found         : false,
-					databaseName,
-					generatedAtIso: index.generatedAtIso,
-					message       : `Table not found in local schema index: ${tableName}`,
-				};
-			}
-			addAnswerEvidence(evidenceItems, {
-				kind    : 'schema_lookup',
-				label   : table.tableName,
-				detail  : `cached schema with ${table.columns.length} columns`,
-				verified: true,
-			});
-
-			const maxColumns = 200;
-			const columns    = table.columns.slice(0, maxColumns).map((c) => ({
-				columnName     : c.columnName,
-				dataType       : c.dataType,
-				columnType     : c.columnType,
-				ordinalPosition: c.ordinalPosition,
-				isNullable     : c.isNullable,
-			}));
-
-			return {
-				exists        : true,
-				found         : true,
-				databaseName,
-				generatedAtIso: index.generatedAtIso,
-				branch        : index.branch,
-				source        : index.source,
-				table         : {
-					tableName       : table.tableName,
-					primaryKey      : table.primaryKey,
-					foreignKeys     : table.foreignKeys,
-					columns,
-					columnsTruncated: table.columns.length > maxColumns,
-				},
-			};
-		}));
-
-		// 2. search_schema - find table names by keyword
-		tools.push(searchSchemaDef.server(async (args) => {
-			const {dbId, query, limit} = args as { dbId: string; query: string; limit?: number };
-			const config               = ensureDbConfig(dbId);
-			if (!config) {
-				return {error: `Database not available for this chat: ${dbId}. Allowed: ${allowedDbDisplay}`};
-			}
-			if (!databaseName) {
-				return {error: 'Database name must be provided'};
-			}
-			const effectiveLimit = typeof limit === 'number' ? limit : 10;
-			onProgress?.(`Searching schema index: ${query}`);
-			onDebugLog?.('tool', 'Schema Index', `Searching schema index for: ${query}`, 'Tool: search_schema');
-
-			const index = await schemaIndexService.loadIndex(config.id, schemaIndexLookupOptions);
-			if (!index) {
-				return {
-					exists : false,
-					message: schemaBranch
-						? `No local schema index found for branch "${schemaBranch}". Generate it in Settings → Database Connection → Database Schema Index, or rely on the fallback/global index.`
-						: 'No local schema index found. Generate it in Settings → Database Connection → Database Schema Index.',
-					databaseName,
-				};
-			}
-
-			const matches = schemaIndexService.searchSchema(index, query, effectiveLimit);
-			addAnswerEvidence(evidenceItems, {
-				kind       : 'schema_lookup',
-				label      : `search_schema("${query}")`,
-				resultCount: matches.length,
-				verified   : matches.length > 0,
-			});
-
-			return {
-				exists        : true,
-				databaseName,
-				generatedAtIso: index.generatedAtIso,
-				branch        : index.branch,
-				source        : index.source,
-				matches,
-			};
-		}));
-
-		// 3. list_tables - list all tables
-		tools.push(listTablesDef.server(async (args) => {
-			const {dbId} = args as { dbId: string };
-			const config = ensureDbConfig(dbId);
-			if (!config) {
-				return {error: `Database not available for this chat: ${dbId}. Allowed: ${allowedDbDisplay}`};
-			}
-			if (!databaseName) {
-				return {error: 'Database name must be provided'};
-			}
-
-			onProgress?.(`Listing tables in ${config.name}`);
-			onDebugLog?.('query', 'Database Schema', `Listing tables in ${databaseName}`, 'SHOW TABLES');
-			const result = await databaseService.listTables(config.id, databaseName, dbHostOverride);
-			addAnswerEvidence(evidenceItems, {
-				kind       : 'schema_lookup',
-				label      : `list_tables(${databaseName})`,
-				resultCount: Array.isArray(result) ? result.length : undefined,
-				verified   : Array.isArray(result) && result.length > 0,
-			});
-			onDebugLog?.('query', 'Database Schema', `Found ${(result as string[]).length} tables`);
-			return result;
-		}));
-
-		// 4. describe_table - get live schema from database
-		tools.push(describeTableDef.server(async (args) => {
-			const {dbId, table_name} = args as { dbId: string; table_name: string };
-			const config             = ensureDbConfig(dbId);
-			if (!config) {
-				return {error: `Database not available for this chat: ${dbId}. Allowed: ${allowedDbDisplay}`};
-			}
-			const tableName = table_name;
-			onProgress?.(`Describing table: ${tableName}`);
-			onDebugLog?.('query', 'Database Schema', `Describing table: ${tableName}`, `DESCRIBE ${tableName}`);
-			const result = await databaseService.getTableSchema(
-				config.id,
-				tableName,
-				databaseName,
-				dbHostOverride,
-			);
-			addAnswerEvidence(evidenceItems, {
-				kind       : 'schema_lookup',
-				label      : `describe_table(${tableName})`,
-				resultCount: Array.isArray(result) ? result.length : undefined,
-				verified   : Array.isArray(result) ? result.length > 0 : true,
-			});
-			return result;
-		}));
-
-		// ============================================================
-		// QUERY TOOLS AFTER SCHEMA TOOLS
-		// ============================================================
-
-		// 5. query_database - execute SQL (AFTER schema tools)
-		tools.push(queryDatabaseDef.server(async (args) => {
-			const {dbId, query} = args as { dbId: string; query: string };
-			const config        = ensureDbConfig(dbId);
-			if (!config) {
-				return {error: `Database not available for this chat: ${dbId}. Allowed: ${allowedDbDisplay}`};
-			}
-			if (!databaseName) {
-				return {error: 'Database name must be provided'};
-			}
-
-			const shortQuery = query.length > 60 ? `${query.substring(0, 60)}...` : query;
-			onProgress?.(`Running query: ${shortQuery}`);
-			onDebugLog?.('query', 'Database Query', `Executing query on ${databaseName}`, query);
-
-			const preflight = await preflightQueryAgainstSchemaIndex(schemaIndexService, config.id, query, schemaIndexLookupOptions);
-			if (!preflight.ok) {
-				const result = {
-					error         : preflight.error,
-					hints         : preflight.hints,
-					recommendation: 'You MUST use get_table_schema_cached FIRST to verify column names before running any query.',
-				};
-				onDebugLog?.('tool', 'Schema Index', 'Preflight blocked a likely-invalid query', JSON.stringify(result, null, 2));
-				return result;
-			}
-
-			const result = await databaseService.executeQuery(
-				config.id,
-				query,
-				databaseName,
-				dbHostOverride,
-			);
-
-			const queryResultObj = result as { rows?: any[]; rowCount?: number };
-			const rowCount       = typeof queryResultObj.rowCount === 'number'
-				? queryResultObj.rowCount
-				: (Array.isArray(queryResultObj.rows) ? queryResultObj.rows.length : undefined);
-			if (queryResultObj.rows && queryResultObj.rows.length > 0) {
-				queryResults.push({query, data: queryResultObj.rows});
-			}
-			addAnswerEvidence(evidenceItems, {
-				kind    : 'database_query',
-				label   : query,
-				rowCount,
-				verified: true,
-			});
-
-			onDebugLog?.(
-				'query',
-				'Database Query',
-				`Query completed - ${queryResultObj.rowCount || 0} rows returned`,
-				formatQueryDebugPreview(result),
-			);
-
-			const {data} = truncateLargeToolResult(result);
-			return data;
-		}));
-
-		// 6. export_to_csv
-		tools.push(exportToCsvDef.server(async (args) => {
-			const {dbId, query, filename} = args as { dbId: string; query: string; filename: string };
-			const config                  = ensureDbConfig(dbId);
-			if (!config) {
-				return {error: `Database not available for this chat: ${dbId}. Allowed: ${allowedDbDisplay}`};
-			}
-			if (!databaseName) {
-				return {error: 'Database name must be provided'};
-			}
-
-			onProgress?.(`Exporting to CSV: ${filename}.csv`);
-			onDebugLog?.('tool', 'CSV Export', `Exporting query results to ${filename}.csv`, query);
-
-			const queryResult = await databaseService.executeQuery(
-				config.id,
-				query,
-				databaseName,
-				dbHostOverride,
-			);
-
-			const queryResultObj = queryResult as { rows?: any[]; rowCount?: number };
-			if (!queryResultObj.rows || queryResultObj.rows.length === 0) {
-				return {error: 'Query returned no data to export'};
-			}
-			addAnswerEvidence(evidenceItems, {
-				kind    : 'csv_export',
-				label   : `${filename}.csv`,
-				rowCount: queryResultObj.rows.length,
-				verified: true,
-			});
-
-			const now          = new Date();
-			const dateStr      = now.toISOString().split('T')[0];
-			const timeStr      = now.toTimeString().split(' ')[0].replace(/:/g, '-');
-			const fullFilename = `${filename}_${dateStr}_${timeStr}.csv`;
-
-			return await exportToCsvFile(fullFilename, queryResultObj.rows);
-		}));
-	}
-
-	if (hasGitHub) {
-		tools.push(searchCodeDef.server(async (args) => {
-			const {query} = args as { query: string };
-			if (toolUsageStats) {
-				toolUsageStats.codeSearches += 1;
-			}
-			codeSearchCallCount += 1;
-			const softLimit       = getCodeSearchSoftLimit(!!localRepoUrl);
-			const isOverSoftLimit = codeSearchCallCount > softLimit;
-			if (isOverSoftLimit) {
-				onDebugLog?.('tool', 'Ripgrep', getCodeSearchSoftLimitMessage(codeSearchCallCount, softLimit, !!localRepoUrl), query);
-			}
-			onProgress?.(`Searching code: ${query.substring(0, 40)}...`);
-			onDebugLog?.('tool', 'Repository', `Searching code: ${query}`, 'Tool: search_code');
-			if (localRepoUrl) {
-				const branch = githubBranchOverride?.trim() || githubConfig?.branch || 'main';
-				onDebugLog?.('tool', 'Ripgrep', `Searching local repo (${branch})`);
+		tools.push(tool(
+			'query_database',
+			'Run one read-only SQL statement (SELECT, SHOW, DESCRIBE or EXPLAIN) against the customer database and get the rows back as tab-separated text. At most 200 rows are returned, so aggregate or filter in SQL when you need totals.',
+			{
+				sql: {type: 'string', description: 'A single read-only MySQL statement'},
+				...dbIdProperty,
+			},
+			['sql'],
+			async (input) => {
+				const db  = resolveDb(input);
+				const sql = str(input, 'sql', true);
+				onProgress?.(`Running query: ${sql.replace(/\s+/g, ' ').slice(0, 60)}...`);
+				onDebugLog?.('query', 'Database Query', `Executing query on ${databaseName}`, sql);
 				try {
-					const localResult = await githubService.searchCodeLocal(query, branch, localRepoUrl);
-					addAnswerEvidence(evidenceItems, {
-						kind       : 'code_search',
-						label      : query,
-						resultCount: Array.isArray(localResult) ? localResult.length : undefined,
-						detail     : `local repo branch ${branch}`,
-						verified   : false,
-					});
-					const meta        = githubService.getLastLocalSearchMeta();
-					if (meta) {
-						onDebugLog?.(
-							'tool',
-							'Ripgrep',
-							`Search completed in ${meta.durationMs}ms: mode=${meta.mode}, tokens=${meta.tokens.join(', ') || '(none)'}${meta.pathSpecs.length > 0 ? `, pathSpecs=${meta.pathSpecs.join(', ')}` : ''}`,
-							`Found ${(localResult as any).length || 0} files in ${meta.worktreePath}`,
-						);
-					} else {
-						onDebugLog?.('tool', 'Ripgrep', `Local search completed - found ${(localResult as any).length || 0} results`);
-					}
-					const {data} = truncateLargeToolResult(localResult);
-					if (isOverSoftLimit) {
-						return {
-							data,
-							note: `Search #${codeSearchCallCount}. Tip: once you know the right file, switch to read_file or read_file_section for verification.`,
-						};
-					}
-					return data;
+					const result = await databaseService.executeQuery(db.id, sql, databaseName, dbHostOverride);
+					evidence.push({kind: 'sql', label: sql, detail: `${result.rowCount} rows`});
+					onDebugLog?.('query', 'Database Query', `Query returned ${result.rowCount} rows`);
+					return {content: formatRows(result.columns, result.rows, MAX_QUERY_ROWS)};
 				} catch (error) {
 					const message = error instanceof Error ? error.message : String(error);
-					onDebugLog?.('error', 'Repository', 'Local repository search failed', message);
-					return {
-						error: `Local repository search failed: ${message}. Remote fallback is disabled while Local Git Sync is configured.`,
-					};
+					evidence.push({kind: 'sql', label: sql, detail: `failed: ${message}`});
+					return {content: `Query failed: ${message}${await schemaHint(db.id, message)}`, isError: true};
 				}
+			},
+		));
+
+		tools.push(tool(
+			'export_to_csv',
+			'Run a read-only SELECT and save the complete result (no row limit) as a CSV file in the user\'s Downloads folder. Use when the user asks for a list, export, extract or overview they will work with outside the chat.',
+			{
+				sql     : {type: 'string', description: 'A single read-only SELECT statement'},
+				filename: {type: 'string', description: 'Descriptive base filename without extension, e.g. "active_customers_brand_x"'},
+				...dbIdProperty,
+			},
+			['sql', 'filename'],
+			async (input) => {
+				const db       = resolveDb(input);
+				const sql      = str(input, 'sql', true);
+				const filename = str(input, 'filename', true);
+				onProgress?.(`Exporting CSV: ${filename}`);
+				try {
+					const result = await databaseService.executeQuery(db.id, sql, databaseName, dbHostOverride);
+					if (result.rows.length === 0) {
+						return {content: 'The query returned no rows, so no file was written.'};
+					}
+					const file = await exportToCsvFile(filename, result.rows, result.columns);
+					evidence.push({kind: 'csv', label: path.basename(file.filePath), detail: `${file.rowCount} rows`});
+					return {content: `Saved ${file.rowCount} rows to ${file.filePath}`};
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					return {content: `Export failed: ${message}${await schemaHint(db.id, message)}`, isError: true};
+				}
+			},
+		));
+	}
+
+	async function schemaHint(configId: string, errorMessage: string): Promise<string> {
+		const index = await loadSchemaIndex(configId);
+		if (!index) {
+			return '';
+		}
+		const missingTable = errorMessage.match(/Table '(?:[^'.]+\.)?([^']+)' doesn't exist/i);
+		if (missingTable) {
+			const suggestions = searchSchemaIndex(index, missingTable[1].replace(/_/g, ' '), 8).map((m) => m.table);
+			return suggestions.length > 0 ? `\nTables with similar names: ${suggestions.join(', ')}` : '';
+		}
+		const missingColumn = errorMessage.match(/Unknown column '(?:([^'.]+)\.)?([^']+)'/i);
+		if (missingColumn) {
+			const qualifier = missingColumn[1];
+			const table     = qualifier ? schemaIndexService.getTable(index, qualifier) : null;
+			if (table) {
+				return `\nColumns in ${table.tableName}: ${table.columns.map((c) => c.columnName).join(', ')}`;
 			}
-			const result = await githubService.searchCode(query, githubBranchOverride);
-			addAnswerEvidence(evidenceItems, {
-				kind       : 'code_search',
-				label      : query,
-				resultCount: Array.isArray(result) ? result.length : undefined,
-				detail     : githubBranchOverride ? `branch ${githubBranchOverride}` : undefined,
-				verified   : false,
-			});
-			onDebugLog?.('tool', 'Repository', `GitHub API search completed - found ${(result as any).length || 0} results`);
-			const {data} = truncateLargeToolResult(result);
-			return data;
-		}));
+			return '\nUse describe_table to check the exact column names.';
+		}
+		return '';
+	}
 
-		tools.push(searchCodeContextDef.server(async (args) => {
-			const {query, max_files, context_lines} = args as { query: string; max_files?: number; context_lines?: number };
-			const maxFiles                          = typeof max_files === 'number' ? max_files : 3;
-			const ctxLines                          = typeof context_lines === 'number' ? context_lines : 40;
-			if (toolUsageStats) {
-				toolUsageStats.contextSearches += 1;
-			}
+	// ── Code ─────────────────────────────────────────────────────────────────
+	if (localRepoUrl) {
+		const repo = githubService.localRepo;
 
-			// Count towards code search limit (shared with search_code)
-			codeSearchCallCount += 1;
-			const softLimit       = getCodeSearchSoftLimit(!!localRepoUrl);
-			const isOverSoftLimit = codeSearchCallCount > softLimit;
-			if (isOverSoftLimit) {
-				onDebugLog?.('tool', 'Ripgrep', getCodeSearchSoftLimitMessage(codeSearchCallCount, softLimit, !!localRepoUrl), query);
-			}
-
-			onProgress?.(`Searching code context: ${query.substring(0, 40)}...`);
-			onDebugLog?.('tool', 'Repository', `Searching code context: ${query}`, 'Tool: search_code_context');
-
-			const branch = githubBranchOverride?.trim() || githubConfig?.branch || 'main';
-			const url    = githubService.getLocalRepoUrl();
-			if (!url) {
-				return {error: 'Local repository is not configured. Configure Local Git Sync in Settings.'};
-			}
-
-			const startTime = Date.now();
-			const results   = await githubService.searchCodeLocal(query, branch, url);
-			const meta      = githubService.getLastLocalSearchMeta();
-			if (meta) {
-				onDebugLog?.(
-					'tool',
-					'Ripgrep',
-					`Context search in ${meta.durationMs}ms: mode=${meta.mode}, tokens=${meta.tokens.join(', ') || '(none)'}${meta.pathSpecs.length > 0 ? `, pathSpecs=${meta.pathSpecs.join(', ')}` : ''}`,
-					`Found ${results.length} files in ${meta.worktreePath}`,
-				);
-			}
-
-			const contexts: Array<{ path: string; excerpt: string }> = [];
-			for (const r of results.slice(0, maxFiles)) {
-				const firstMatch = (r.matches && r.matches.length > 0) ? String(r.matches[0]) : '';
-				const m          = firstMatch.match(/^(\d+):\s*/);
-				const line       = m ? Number.parseInt(m[1], 10) : 1;
-				const start      = Math.max(1, line - ctxLines);
-				const end        = line + ctxLines;
-				const excerpt    = await githubService.readFileLocalSnippet(r.path, branch, url, start, end);
-				contexts.push({path: r.path, excerpt});
-			}
-			addAnswerEvidence(evidenceItems, {
-				kind       : 'code_context',
-				label      : query,
-				resultCount: contexts.length,
-				detail     : contexts.map((c) => c.path).join(', '),
-				verified   : contexts.length > 0,
-			});
-
-			const totalMs = Date.now() - startTime;
-			onDebugLog?.('tool', 'Ripgrep', `Context extraction completed in ${totalMs}ms`, `Extracted ${contexts.length} snippets`);
-
-			if (isOverSoftLimit) {
-				return {
-					data: contexts,
-					note: `Search #${codeSearchCallCount}. Tip: once you know the right file, switch to read_file or read_file_section for verification.`,
-				};
-			}
-			return contexts;
-		}));
-
-		// read_file_section: Read a specific section of a file by line range (efficient for large files)
-		const readFileSectionDef = toolDefinition({
-			name        : 'read_file_section',
-			description : 'Read a specific section of a file by line range. MUCH more efficient than read_file for large files (e.g., 5000+ lines). Use this when you know the file path from a previous search and need to see a specific function or class.',
-			inputSchema : z.object({
-				file_path : z.string().describe('Path to the file in the repository'),
-				start_line: z.number().int().min(1).describe('First line to read (1-based)'),
-				end_line  : z.number().int().min(1).describe('Last line to read (1-based). Max range: 300 lines.'),
-			}),
-			outputSchema: z.any(),
-		});
-
-		tools.push(readFileSectionDef.server(async (args) => {
-			const {file_path, start_line, end_line} = args as { file_path: string; start_line: number; end_line: number };
-			const clampedEnd                        = Math.min(end_line, start_line + 300);
-			if (toolUsageStats) {
-				toolUsageStats.fileSectionReads += 1;
-			}
-			onProgress?.(`Reading ${file_path}:${start_line}-${clampedEnd}`);
-			onDebugLog?.('tool', 'Repository', `Reading file section: ${file_path} lines ${start_line}-${clampedEnd}`, 'Tool: read_file_section');
-
-			const branch = githubBranchOverride?.trim() || githubConfig?.branch || 'main';
-			const url    = githubService.getLocalRepoUrl();
-			if (!url) {
-				// Fallback: read full file and slice
-				const fullContent = await githubService.getFileContent(file_path, githubBranchOverride);
-				if (typeof fullContent === 'string') {
-					const lines = fullContent.split('\n');
-					addAnswerEvidence(evidenceItems, {
-						kind    : 'file_read',
-						label   : file_path,
-						detail  : `lines ${start_line}-${clampedEnd}`,
-						verified: true,
+		tools.push(tool(
+			'search_code',
+			'Search the SPY source code (ripgrep) on the chat\'s branch. The pattern is a literal string by default, case-insensitive unless it contains uppercase. Returns matching lines with line numbers, grouped by file.',
+			{
+				pattern       : {type: 'string', description: 'Text to find, e.g. "function generateEanExcel" or "is_consignment_customer"'},
+				regex         : {type: 'boolean', description: 'Treat pattern as a regular expression (Rust regex syntax)'},
+				path          : {type: 'string', description: 'Limit to this directory or file, e.g. "applications/Spy/Controller"'},
+				glob          : {type: 'string', description: 'Limit to files matching this glob, e.g. "*.php" or "*.{ts,tsx}"'},
+				context_lines : {type: 'integer', description: 'Lines of context around each match (0-30, default 0)'},
+				case_sensitive: {type: 'boolean'},
+				max_matches   : {type: 'integer', description: 'Default 60, max 300'},
+			},
+			['pattern'],
+			async (input) => {
+				const pattern = str(input, 'pattern', true);
+				onProgress?.(`Searching code: ${pattern.slice(0, 50)}`);
+				const result = await repo.search(localRepoUrl, branch, {
+					pattern,
+					regex        : bool(input, 'regex'),
+					caseSensitive: bool(input, 'case_sensitive'),
+					path         : str(input, 'path'),
+					glob         : str(input, 'glob'),
+					contextLines : int(input, 'context_lines', 0, 30),
+					maxMatches   : int(input, 'max_matches', 1, 300),
+				});
+				evidence.push({kind: 'code_search', label: pattern, detail: `${result.matchCount} matches in ${result.files.length} files`});
+				if (result.files.length === 0) {
+					return {content: `No matches for "${pattern}".`};
+				}
+				const blocks = result.files.map((file) => {
+					let previous = -1;
+					const lines  = file.lines.map((l) => {
+						const gap = previous !== -1 && l.line > previous + 1 ? '  ...\n' : '';
+						previous  = l.line;
+						return `${gap}${l.line}${l.isMatch ? ':' : '-'} ${l.text}`;
 					});
-					return {
-						file   : file_path,
-						lines  : `${start_line}-${clampedEnd}`,
-						total  : lines.length,
-						content: lines.slice(start_line - 1, clampedEnd).map((l, i) => `${start_line + i}: ${l}`).join('\n'),
-					};
+					return `${file.path}\n${lines.join('\n')}`;
+				});
+				const note   = result.truncated ? `\n\n[Stopped after ${result.matchCount} matches - narrow with path/glob or a more specific pattern.]` : '';
+				return {content: capText(blocks.join('\n\n') + note)};
+			},
+		));
+
+		tools.push(tool(
+			'read_file',
+			`Read a source file (or a line range of it) with line numbers. Up to ${MAX_FILE_LINES} lines per call; use start_line/end_line to page through larger files.`,
+			{
+				path      : {type: 'string', description: 'Path relative to the repository root'},
+				start_line: {type: 'integer', description: '1-based first line (default 1)'},
+				end_line  : {type: 'integer', description: 'Last line to include'},
+			},
+			['path'],
+			async (input) => {
+				const filePath = str(input, 'path', true);
+				onProgress?.(`Reading ${filePath}`);
+				const content = await repo.readFile(localRepoUrl, branch, filePath);
+				const lines   = content.split('\n');
+				const start   = int(input, 'start_line', 1, Math.max(1, lines.length)) ?? 1;
+				const end     = Math.min(int(input, 'end_line', start, lines.length) ?? lines.length, start + MAX_FILE_LINES - 1);
+				evidence.push({kind: 'file', label: filePath, detail: start === 1 && end === lines.length ? undefined : `lines ${start}-${end}`});
+				const more = end < lines.length ? `\n\n[File has ${lines.length} lines; showing ${start}-${end}. Continue with start_line=${end + 1}.]` : '';
+				return {content: capText(numberLines(lines.slice(start - 1, end).join('\n'), start) + more)};
+			},
+		));
+
+		tools.push(tool(
+			'list_directory',
+			'List the files and subdirectories of a repository directory.',
+			{path: {type: 'string', description: 'Directory relative to the repository root ("" for the root)'}},
+			[],
+			async (input) => {
+				const dir     = str(input, 'path') ?? '';
+				const entries = await repo.listDirectory(localRepoUrl, branch, dir);
+				const shown   = entries.slice(0, 500).map((e) => `${e.type === 'dir' ? 'dir ' : 'file'} ${e.path}`);
+				return {content: shown.join('\n') + (entries.length > 500 ? `\n[${entries.length - 500} more entries not shown]` : '')};
+			},
+		));
+
+		tools.push(tool(
+			'find_files',
+			'Find repository files whose path contains all the given words (case-insensitive), e.g. "controller shopify" or "Topseller".',
+			{
+				query: {type: 'string'},
+				limit: {type: 'integer', description: 'Default 100'},
+			},
+			['query'],
+			async (input) => {
+				const query  = str(input, 'query', true);
+				const result = await repo.findFiles(localRepoUrl, branch, query, int(input, 'limit', 1, 500) ?? 100);
+				evidence.push({kind: 'code_search', label: `find_files "${query}"`, detail: `${result.total} files`});
+				if (result.total === 0) {
+					return {content: `No file paths contain all of: ${query}`};
 				}
-				return fullContent;
-			}
+				const more = result.total > result.paths.length ? `\n[${result.total - result.paths.length} more]` : '';
+				return {content: result.paths.join('\n') + more};
+			},
+		));
 
-			const snippet = await githubService.readFileLocalSnippet(file_path, branch, url, start_line, clampedEnd);
-			addAnswerEvidence(evidenceItems, {
-				kind    : 'file_read',
-				label   : file_path,
-				detail  : `lines ${start_line}-${clampedEnd}`,
-				verified: true,
-			});
-			return {
-				file   : file_path,
-				lines  : `${start_line}-${clampedEnd}`,
-				content: snippet,
-			};
-		}));
+		const formatCommits = (commits: CommitSummary[]): string =>
+			commits.map((c) => `${c.sha}  ${c.date}  ${c.author}  ${c.subject}${c.firstRelease ? `  [first release: ${c.firstRelease}]` : ''}`).join('\n');
 
-		tools.push(readFileDef.server(async (args) => {
-			const {file_path} = args as { file_path: string };
-			if (toolUsageStats) {
-				toolUsageStats.fileReads += 1;
-			}
-			onProgress?.(`Reading file: ${file_path}`);
-			onDebugLog?.('tool', 'Repository', `Reading file: ${file_path}`, 'Tool: read_file');
-			if (localRepoUrl) {
-				onDebugLog?.('tool', 'Ripgrep', 'Attempting local file read', file_path);
-			}
-			const result = await githubService.getFileContent(file_path, githubBranchOverride);
-			addAnswerEvidence(evidenceItems, {
-				kind    : 'file_read',
-				label   : file_path,
-				detail  : githubBranchOverride ? `branch ${githubBranchOverride}` : undefined,
-				verified: typeof result === 'string' && result.length > 0,
-			});
-			onDebugLog?.('tool', 'Repository', `File read successfully: ${file_path}`);
-			const {data} = truncateLargeToolResult(result);
-			return data;
-		}));
+		tools.push(tool(
+			'file_history',
+			'Git history of a file or directory: which commits changed it, when, by whom, and the first release branch (YYYY_MM) that shipped each change. With "search", only commits that added or removed that exact text in the path - use it to find when a behaviour was introduced or removed. Defaults to the chat\'s branch.',
+			{
+				path  : {type: 'string', description: 'File or directory relative to the repository root'},
+				search: {type: 'string', description: 'Only commits that added/removed this exact text in the path'},
+				since : {type: 'string', description: 'Only commits after this date, e.g. "2026-01-01" or "6 months ago"'},
+				branch: {type: 'string', description: 'Branch to read history from (default: the chat\'s branch)'},
+				limit : {type: 'integer', description: 'Max commits (default 20, max 100)'},
+			},
+			['path'],
+			async (input) => {
+				const filePath = str(input, 'path', true);
+				onProgress?.(`Reading history of ${filePath}`);
+				const commits = await repo.fileHistory(localRepoUrl, {
+					branch: str(input, 'branch') ?? branch,
+					path  : filePath,
+					search: str(input, 'search'),
+					since : str(input, 'since'),
+					limit : int(input, 'limit', 1, 100),
+				});
+				evidence.push({
+					kind  : 'history',
+					label : `history ${filePath}${input.search ? ` "${input.search}"` : ''}`,
+					detail: `${commits.length} commits`,
+				});
+				return {content: commits.length > 0 ? formatCommits(commits) : 'No matching commits.'};
+			},
+		));
 
-		tools.push(listFilesDef.server(async (args) => {
-			const {directory_path} = args as { directory_path: string };
-			onProgress?.(`Listing files in: ${directory_path || '/'} `);
-			onDebugLog?.('tool', 'Repository', `Listing files in: ${directory_path || '/'}`, 'Tool: list_files');
-			if (localRepoUrl) {
-				onDebugLog?.('tool', 'Ripgrep', 'Attempting local directory listing', directory_path || '/');
-			}
-			const result = await githubService.listFiles(directory_path, githubBranchOverride);
-			addAnswerEvidence(evidenceItems, {
-				kind       : 'code_search',
-				label      : `list_files(${directory_path || '/'})`,
-				resultCount: Array.isArray(result) ? result.length : undefined,
-				verified   : false,
-			});
-			onDebugLog?.('tool', 'Repository', `Listed ${(result as any).length || 0} files`);
-			const {data} = truncateLargeToolResult(result);
-			return data;
-		}));
+		tools.push(tool(
+			'show_commit',
+			'Show a commit: message, changed files and the code diff (optionally only for one path), plus the first release that contains it.',
+			{
+				commit: {type: 'string', description: 'Commit hash'},
+				path  : {type: 'string', description: 'Limit the diff to this file or directory'},
+			},
+			['commit'],
+			async (input) => {
+				const commit = str(input, 'commit', true);
+				onProgress?.(`Reading commit ${commit}`);
+				const text = await repo.showCommit(localRepoUrl, {commit, path: str(input, 'path')});
+				evidence.push({kind: 'history', label: `commit ${commit}`});
+				return {content: capText(text)};
+			},
+		));
 
-		tools.push(getRepositoryStructureDef.server(async () => {
-			onProgress?.('Getting repository structure');
-			onDebugLog?.('tool', 'Repository', 'Getting repository structure', 'Tool: get_repository_structure');
-			if (localRepoUrl) {
-				onDebugLog?.('tool', 'Ripgrep', 'Attempting local tree fetch', localRepoUrl);
-			}
-			const result = await githubService.getTree(true, githubBranchOverride);
-			addAnswerEvidence(evidenceItems, {
-				kind       : 'code_search',
-				label      : 'get_repository_structure',
-				resultCount: Array.isArray(result) ? result.length : undefined,
-				verified   : false,
-			});
-			onDebugLog?.('tool', 'Repository', 'Repository structure retrieved');
-			const {data} = truncateLargeToolResult(result);
-			return data;
-		}));
+		tools.push(tool(
+			'compare_branches',
+			'List the commits that are on one branch but not another - e.g. what changed between two releases ("2026_07" -> "2026_09") - optionally only for one path, with the code diff for that path.',
+			{
+				from        : {type: 'string', description: 'Older branch, e.g. "2026_07"'},
+				to          : {type: 'string', description: 'Newer branch, e.g. "2026_09" (default: the chat\'s branch)'},
+				path        : {type: 'string', description: 'Only changes to this file or directory'},
+				include_diff: {type: 'boolean', description: 'Include the code diff for the path (requires path)'},
+			},
+			['from'],
+			async (input) => {
+				const from = str(input, 'from', true);
+				const to   = str(input, 'to') ?? branch;
+				if (!to) {
+					throw new ToolInputError('Give "to" - this chat has no branch selected');
+				}
+				onProgress?.(`Comparing ${from} and ${to}`);
+				const result = await repo.compareBranches(localRepoUrl, {
+					from,
+					to,
+					path       : str(input, 'path'),
+					includeDiff: bool(input, 'include_diff'),
+				});
+				evidence.push({
+					kind  : 'history',
+					label : `${from}..${to}${input.path ? ` ${input.path}` : ''}`,
+					detail: `${result.totalCommits} commits`,
+				});
+				const header = `${result.totalCommits} commit(s) on ${to} that are not on ${from}${result.totalCommits > result.commits.length ? ` (showing ${result.commits.length})` : ''}:`;
+				return {content: capText([header, formatCommits(result.commits), result.diff ? `\n${result.diff}` : ''].join('\n'))};
+			},
+		));
+	} else if (hasRemote) {
+		tools.push(tool(
+			'search_code',
+			'Search the SPY source code with GitHub code search (default branch only, word-based matching). Returns file paths with matching fragments.',
+			{pattern: {type: 'string'}},
+			['pattern'],
+			async (input) => {
+				const pattern = str(input, 'pattern', true);
+				const results = await githubService.searchCodeRemote(pattern);
+				evidence.push({kind: 'code_search', label: pattern, detail: `${results.length} files (GitHub)`});
+				return {content: results.length > 0 ? toJson(results) : `No matches for "${pattern}".`};
+			},
+		));
+		tools.push(tool(
+			'read_file',
+			'Read a source file from GitHub with line numbers.',
+			{
+				path      : {type: 'string'},
+				start_line: {type: 'integer'},
+				end_line  : {type: 'integer'},
+			},
+			['path'],
+			async (input) => {
+				const filePath = str(input, 'path', true);
+				const lines    = (await githubService.getFileContentRemote(filePath, branch)).split('\n');
+				const start    = int(input, 'start_line', 1, Math.max(1, lines.length)) ?? 1;
+				const end      = Math.min(int(input, 'end_line', start, lines.length) ?? lines.length, start + MAX_FILE_LINES - 1);
+				evidence.push({kind: 'file', label: filePath});
+				const more = end < lines.length ? `\n\n[File has ${lines.length} lines; showing ${start}-${end}.]` : '';
+				return {content: capText(numberLines(lines.slice(start - 1, end).join('\n'), start) + more)};
+			},
+		));
+		tools.push(tool(
+			'list_directory',
+			'List a repository directory on GitHub.',
+			{path: {type: 'string'}},
+			[],
+			async (input) => {
+				const entries = await githubService.listFilesRemote(str(input, 'path') ?? '', branch);
+				return {content: entries.map((e) => `${e.type === 'dir' ? 'dir ' : 'file'} ${e.path}`).join('\n')};
+			},
+		));
 	}
 
 	if (hasSpyCodeAi) {
-		tools.push(spySearchCodeDef.server(async (args) => {
-			if (toolUsageStats) {
-				toolUsageStats.codeSearches += 1;
-			}
-			const query = String((args as { query?: string }).query || '');
-			onProgress?.(`Searching indexed SPY code: ${query.substring(0, 40)}...`);
-			onDebugLog?.('tool', 'Spy Code AI MCP', `Searching indexed code: ${query}`, 'Tool: spy_search_code');
-			const raw    = await spyCodeAiMcpService.searchCode(args as any);
-			addAnswerEvidence(evidenceItems, {
-				kind       : 'mcp_index',
-				label      : query,
-				resultCount: Array.isArray(raw) ? raw.length : undefined,
-				detail     : 'spy_search_code indexed result',
-				verified   : false,
-			});
-			const {data} = truncateLargeToolResult(raw);
-			return data;
-		}));
-
-		tools.push(spySearchContextDef.server(async (args) => {
-			if (toolUsageStats) {
-				toolUsageStats.contextSearches += 1;
-			}
-			const query = String((args as { query?: string }).query || '');
-			onProgress?.(`Searching indexed SPY context: ${query.substring(0, 40)}...`);
-			onDebugLog?.('tool', 'Spy Code AI MCP', `Searching indexed context: ${query}`, 'Tool: spy_search_context');
-			const raw    = await spyCodeAiMcpService.searchContext(args as any);
-			addAnswerEvidence(evidenceItems, {
-				kind       : 'mcp_index',
-				label      : query,
-				resultCount: Array.isArray(raw) ? raw.length : undefined,
-				detail     : 'spy_search_context indexed result',
-				verified   : false,
-			});
-			const {data} = truncateLargeToolResult(raw);
-			return data;
-		}));
+		tools.push(tool(
+			'spy_search_code',
+			'Search the pre-built SPY code index by meaning or symbol (classes, methods, entity fields, routes, SQL). Good for discovering where something lives; confirm important details by reading the file when read_file is available.',
+			{
+				query     : {type: 'string'},
+				kind      : {
+					type: 'string',
+					enum: ['entity_field', 'class', 'method', 'sql_query', 'route', 'relation', 'ts_file', 'view', 'api_endpoint'],
+				},
+				limit     : {type: 'integer'},
+				match_mode: {type: 'string', enum: ['auto', 'semantic', 'symbolic', 'hybrid']},
+			},
+			['query'],
+			async (input) => {
+				const query = str(input, 'query', true);
+				onProgress?.(`Searching code index: ${query.slice(0, 50)}`);
+				const raw = await spyCodeAiMcpService.searchCode({
+					query,
+					kind      : str(input, 'kind') as SpySearchCodeArgs['kind'],
+					limit     : int(input, 'limit', 1, 50),
+					match_mode: str(input, 'match_mode') as SpySearchCodeArgs['match_mode'],
+				});
+				evidence.push({kind: 'mcp', label: query});
+				return {content: toJson(raw)};
+			},
+		));
+		tools.push(tool(
+			'spy_search_context',
+			'Get an overview of how a SPY feature area is implemented (data, logic, API, UI, relationships) from the code index.',
+			{
+				query: {type: 'string', description: 'Natural-language description of the feature area'},
+				limit: {type: 'integer'},
+			},
+			['query'],
+			async (input) => {
+				const query = str(input, 'query', true);
+				onProgress?.(`Searching code index: ${query.slice(0, 50)}`);
+				const raw = await spyCodeAiMcpService.searchContext({query, limit: int(input, 'limit', 1, 50)});
+				evidence.push({kind: 'mcp', label: query});
+				return {content: toJson(raw)};
+			},
+		));
 	}
 
-	// Always available: ask user for clarification (Cursor-style follow-up)
-	tools.push(askClarifyingQuestionDef.server(async (args) => {
-		const {question, options, allowFreeText} = args as { question: string; options?: string[]; allowFreeText?: boolean };
-		onDebugLog?.('info', 'Clarification', `AI asking: ${question}`, options?.join(', ') || '');
-		return {
-			__clarificationRequest: true,
-			question,
-			options               : options && options.length > 0 ? options : undefined,
-			allowFreeText         : allowFreeText !== false,
-		};
-	}));
+
+	if (hasSentry) {
+		const periods = ['24h', '7d', '14d', '30d', '90d'];
+		tools.push(tool(
+			'search_errors',
+			`Search SPY's Sentry for errors (exceptions from PHP and the browser)${systemKey ? `, by default only on this chat's system (${systemKey})` : ''}. Returns issues with how often they occurred in the period and when first/last seen. Use when the user reports an error, a failing page, a crash, or something that "stopped working".`,
+			{
+				query      : {
+					type       : 'string',
+					description: 'Optional Sentry search terms, e.g. "Shopify", "url:*s_orders.php*", "level:error", or words from the error message',
+				},
+				period     : {type: 'string', enum: periods, description: 'Time window (default 7d)'},
+				all_systems: {type: 'boolean', description: 'Search across all customer systems instead of this chat\'s system'},
+				limit      : {type: 'integer', description: 'Max issues (default 15, max 50)'},
+			},
+			[],
+			async (input) => {
+				const allSystems = bool(input, 'all_systems') === true;
+				if (!systemKey && !allSystems && !str(input, 'query')) {
+					throw new ToolInputError('This chat has no system selected; give a query or set all_systems');
+				}
+				const period = str(input, 'period') ?? '7d';
+				if (!periods.includes(period)) {
+					throw new ToolInputError(`period must be one of ${periods.join(', ')}`);
+				}
+				onProgress?.('Searching Sentry...');
+				const issues = await sentryService.searchIssues({
+					systemKey: allSystems ? undefined : systemKey,
+					query    : str(input, 'query'),
+					period,
+					limit    : int(input, 'limit', 1, 50) ?? 15,
+				});
+				evidence.push({
+					kind  : 'sentry',
+					label : `search_errors${input.query ? ` "${input.query}"` : ''} (${allSystems ? 'all systems' : systemKey}, ${period})`,
+					detail: `${issues.length} issues`,
+				});
+				if (issues.length === 0) {
+					return {content: `No errors in Sentry for ${allSystems ? 'any system' : systemKey ?? 'the query'} in the last ${period}.`};
+				}
+				return {
+					content: issues.map((i) => `${i.issue}  ${i.count}×  last ${i.lastSeen ?? '?'}  first ${i.firstSeen ?? '?'}  [${i.project ?? ''}]  ${i.title}\n  ${i.url}`).join('\n'),
+				};
+			},
+		));
+
+		tools.push(tool(
+			'get_error_details',
+			'Get the details of a Sentry issue: the stack trace (file, line, function), the request URL, tags and breadcrumbs of its latest event on this chat\'s system. Follow up by reading the files in the stack trace.',
+			{issue: {type: 'string', description: 'Issue short id (e.g. "SPY-4HE") or Sentry issue URL'}},
+			['issue'],
+			async (input) => {
+				const issue = str(input, 'issue', true);
+				onProgress?.(`Reading Sentry issue ${issue}`);
+				const text = await sentryService.describeIssue(issue, systemKey);
+				evidence.push({kind: 'sentry', label: issue});
+				return {content: capText(text)};
+			},
+		));
+	}
+
+	tools.push(tool(
+		'search_knowledge',
+		'Search the internal SPY knowledge base: feature areas and where their code lives, business terminology and synonyms, and example joins between tables. Use English keywords.',
+		{query: {type: 'string'}},
+		['query'],
+		async (input) => {
+			const query = str(input, 'query', true);
+			const docs  = await knowledgeService.search(query, 6);
+			evidence.push({kind: 'knowledge', label: query, detail: `${docs.length} documents`});
+			return {content: docs.length > 0 ? capText(docs.map((d) => d.text).join('\n\n---\n\n')) : 'Nothing found.'};
+		},
+	));
+
+	tools.push(tool(
+		'ask_clarifying_question',
+		'Ask the user a question and end your turn. Only for information you cannot look up with the other tools and that would materially change the answer (for example which of two plausible records or features they mean).',
+		{
+			question       : {type: 'string', description: 'The question, in the user\'s language'},
+			options        : {type: 'array', items: {type: 'string'}, description: '2-4 short answers the user can click'},
+			allow_free_text: {type: 'boolean', description: 'Allow a typed answer (default true)'},
+		},
+		['question'],
+		async (input) => {
+			const question = str(input, 'question', true);
+			const options  = Array.isArray(input.options) ? input.options.filter((o): o is string => typeof o === 'string' && o.trim() !== '').slice(0, 4) : undefined;
+			return {
+				content      : 'Question shown to the user.',
+				clarification: {
+					question,
+					options      : options && options.length > 0 ? options : undefined,
+					allowFreeText: bool(input, 'allow_free_text') !== false,
+				},
+			};
+		},
+	));
 
 	return {
-		tools,
-		hasGitHub,
-		resetSearchCounter: () => {
-			codeSearchCallCount = 0;
+		tools       : tools.map((t) => ({
+			definition: t.definition,
+			run       : async (input) => {
+				try {
+					return await t.run(input ?? {});
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					onDebugLog?.('error', 'Tool', `${t.definition.name} failed`, message);
+					return {content: `Error: ${message}`, isError: true};
+				}
+			},
+		})),
+		capabilities: {
+			database   : hasDatabase,
+			schemaIndex: hasSchemaIndex,
+			localCode  : !!localRepoUrl,
+			remoteCode : hasRemote,
+			spyCodeAi  : hasSpyCodeAi,
+			sentry     : hasSentry,
 		},
 	};
 }

@@ -6,7 +6,7 @@ import './DebugView.css';
 interface DebugRunGroup {
 	id: string;
 	chatId?: string;
-	provider?: 'claude' | 'openai';
+	provider?: 'claude';
 	logs: DebugLogEntry[];
 	firstTimestamp: string;
 	lastTimestamp: string;
@@ -26,7 +26,7 @@ function isTerminalCompletedLog(log: DebugLogEntry): boolean {
 	if (log.meta?.terminal === true || log.meta?.terminal === 'true') {
 		return true;
 	}
-	if (log.category === 'TanStack AI' && /^Stream finished\b/i.test(log.message)) {
+	if (log.category === 'Claude' && /^Stream finished\b/i.test(log.message)) {
 		return true;
 	}
 	return (

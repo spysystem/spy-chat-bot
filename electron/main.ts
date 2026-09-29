@@ -1,19 +1,17 @@
 import {app, BrowserWindow, ipcMain, Menu, shell} from 'electron';
 import {autoUpdater} from 'electron-updater';
 import * as path from 'path';
+import {AttachmentService} from './services/attachment-service';
 import type {ChatMessage, ChatUpdate} from './services/chat-service';
 import {ChatService} from './services/chat-service';
 import {ClaudeService} from './services/claude-service';
-import {OpenAIService} from './services/openai-service';
-import {AIOrchestrator} from './services/ai-orchestrator';
-import {AttachmentService} from './services/attachment-service';
 import {DatabaseService} from './services/database-service';
-import {SchemaIndexService} from './services/schema-index-service';
+import {GitInstallerService} from './services/git-installer-service';
 import type {GitHubConfig} from './services/github-service';
 import {GitHubService} from './services/github-service';
-import {GitInstallerService} from './services/git-installer-service';
-import {LATENCY_FLAGS} from './services/latency-flags';
+import {SchemaIndexService} from './services/schema-index-service';
 import {SecureStorageService} from './services/secure-storage-service';
+import {SentryService} from './services/sentry-service';
 import type {AiQualityProfile} from './services/settings-service';
 import {SettingsService} from './services/settings-service';
 import {SpyCodeAiMcpService} from './services/spy-code-ai-mcp-service';
@@ -37,7 +35,7 @@ interface DebugLogEntry {
 	details?: string;
 	chatId?: string;
 	runId?: string;
-	provider?: 'claude' | 'openai';
+	provider?: 'claude';
 	phase?: DebugLogPhase;
 	toolName?: string;
 	durationMs?: number;
@@ -49,7 +47,7 @@ interface DebugLogEntry {
 interface DebugLogContext {
 	chatId?: string;
 	runId?: string;
-	provider?: 'claude' | 'openai';
+	provider?: 'claude';
 	phase?: DebugLogPhase;
 	toolName?: string;
 	durationMs?: number;
@@ -61,8 +59,6 @@ interface DebugLogContext {
 // Initialize services with secure storage
 const secureStorage          = new SecureStorageService();
 const claudeService          = new ClaudeService(secureStorage);
-const openaiService          = new OpenAIService(secureStorage);
-const aiOrchestrator         = new AIOrchestrator(claudeService, openaiService);
 const databaseService        = new DatabaseService(secureStorage);
 const schemaIndexService     = new SchemaIndexService();
 const spyCodeAiMcpService    = new SpyCodeAiMcpService();
@@ -72,7 +68,17 @@ const githubService          = new GitHubService(secureStorage);
 const settingsService        = new SettingsService();
 const systemDirectoryService = new SystemDirectoryService();
 const gitInstallerService    = new GitInstallerService();
+const sentryService          = new SentryService(secureStorage);
 const aiStreamControllers    = new Map<string, AbortController>();
+claudeService.setDependencies({
+	databaseService,
+	githubService,
+	schemaIndexService,
+	spyCodeAiMcpService,
+	chatService,
+	attachmentService,
+	sentryService,
+});
 
 // Configure auto-updater
 autoUpdater.autoDownload         = true;
@@ -101,7 +107,7 @@ function inferPhase(type: DebugLogType, category: string): DebugLogPhase {
 	if (normalized.includes('vector') || normalized.includes('schema cache') || normalized.includes('context')) {
 		return 'retrieval';
 	}
-	if (normalized.includes('latency') || normalized.includes('tanstack') || normalized.includes('openai api') || normalized.includes('claude api')) {
+	if (normalized.includes('latency') || normalized.includes('claude')) {
 		return 'technical';
 	}
 	if (normalized.includes('git local sync') || normalized.includes('worktree')) {
@@ -123,7 +129,7 @@ function truncateDebugText(text: string, maxLength: number = 4000): string {
 	return `${text.slice(0, maxLength)}\n\n[truncated ${text.length - maxLength} chars]`;
 }
 
-function formatTanStackEventDetails(aiEvent: any): string {
+function formatAiEventDetails(aiEvent: any): string {
 	if (!aiEvent || typeof aiEvent !== 'object') {
 		return '(no event payload)';
 	}
@@ -201,6 +207,34 @@ function handleDeepLink(url: string): void {
 	}
 }
 
+function isWebUrl(url: string): boolean {
+	try {
+		const protocol = new URL(url).protocol;
+		return protocol === 'https:' || protocol === 'http:';
+	} catch {
+		return false;
+	}
+}
+
+/** Links in answers open in the user's browser; the app window itself never navigates away. */
+function routeLinksToBrowser(window: BrowserWindow): void {
+	window.webContents.setWindowOpenHandler(({url}) => {
+		if (isWebUrl(url)) {
+			void shell.openExternal(url);
+		}
+		return {action: 'deny'};
+	});
+	window.webContents.on('will-navigate', (event, url) => {
+		const current = window.webContents.getURL();
+		if (url !== current && !url.startsWith('http://localhost:5173') && !url.startsWith('file://')) {
+			event.preventDefault();
+			if (isWebUrl(url)) {
+				void shell.openExternal(url);
+			}
+		}
+	});
+}
+
 function createWindow(): void {
 	const preloadPath = path.join(__dirname, 'preload.js');
 
@@ -223,6 +257,8 @@ function createWindow(): void {
 		const indexPath = path.join(__dirname, '../renderer/index.html');
 		mainWindow.loadFile(indexPath);
 	}
+
+	routeLinksToBrowser(mainWindow);
 
 	mainWindow.on('closed', () => {
 		mainWindow = null;
@@ -324,6 +360,8 @@ function createDebugWindow(): void {
 		debugWindow.loadFile(indexPath, {hash: 'debug'});
 	}
 
+	routeLinksToBrowser(debugWindow);
+
 	debugWindow.on('closed', () => {
 		debugWindow = null;
 	});
@@ -415,8 +453,8 @@ if (!gotTheLock) {
 				return;
 			}
 			try {
-				await githubService.ensureLocalRepo(localRepoUrl, {fetch: true});
-				sendDebugLog('info', 'Git Local Sync', 'Background fetch completed');
+				await githubService.localRepo.sync(localRepoUrl);
+				sendDebugLog('info', 'Git Local Sync', 'Background sync completed');
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				sendDebugLog('error', 'Git Local Sync', 'Background fetch failed', message);
@@ -471,10 +509,6 @@ ipcMain.handle('get-database-configs', async () => {
 	return await databaseService.getConfigs();
 });
 
-ipcMain.handle('delete-database-config', async (_event, id: string) => {
-	return await databaseService.deleteConfig(id);
-});
-
 // System directory (customer/system list)
 ipcMain.handle('get-systems', async (_event, statuses?: string[]) => {
 	return await systemDirectoryService.getSystems(statuses);
@@ -520,68 +554,6 @@ ipcMain.handle('open-attachment', async (_event, storedPath: string) => {
 	return await attachmentService.openAttachment(storedPath);
 });
 
-ipcMain.handle('send-message', async (event, chatId: string, message: string, databases: string[], history?: Array<{
-	role: string;
-	content: string
-}>, chatContext?: { databaseName?: string; dbHost?: string; githubBranch?: string }, attachments?: any[]) => {
-	const [selectedModel, aiQualityProfile] = await Promise.all([
-		settingsService.getSelectedModel(),
-		settingsService.getAiQualityProfile(),
-	]);
-	const onProgress                        = (status: string) => {
-		event.sender.send('message-progress', {chatId, streamId: '', status});
-	};
-	const runId                             = `sync_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-	const log                               = createDebugLogger({chatId, runId, provider: selectedModel, phase: 'ipc'});
-	log('info', 'IPC', 'Synchronous send-message request started', undefined, {
-		status: 'started',
-		meta  : {
-			databaseCount : databases.length,
-			hasHistory    : !!history?.length,
-			hasAttachments: !!attachments?.length,
-			provider      : selectedModel,
-			qualityProfile: aiQualityProfile,
-		},
-	});
-
-	const onDebugLog = (type: DebugLogType, category: string, messageText: string, details?: string) => {
-		log(type, category, messageText, details);
-	};
-
-	try {
-		const result = await aiOrchestrator.sendMessage(
-			selectedModel === 'openai' ? 'openai' : 'claude',
-			{
-				chatId,
-				userMessage         : message,
-				databaseIds         : databases,
-				databaseService,
-				githubService,
-				schemaIndexService,
-				spyCodeAiMcpService,
-				chatService,
-				attachmentService,
-				onProgress,
-				conversationHistory : history,
-				databaseName        : chatContext?.databaseName,
-				dbHostOverride      : chatContext?.dbHost,
-				githubBranchOverride: chatContext?.githubBranch,
-				attachments,
-				aiQualityProfile,
-				onDebugLog,
-			},
-		);
-		log('info', 'IPC', 'Synchronous send-message request finished', undefined, {
-			status: 'completed',
-			meta  : {terminal: true},
-		});
-		return result;
-	} catch (error) {
-		log('error', 'IPC', 'Synchronous send-message request failed', error instanceof Error ? error.message : String(error), {status: 'failed'});
-		throw error;
-	}
-});
-
 ipcMain.handle('start-ai-stream', async (event, chatId: string, message: string, databases: string[], history?: Array<{
 	role: string;
 	content: string;
@@ -589,19 +561,16 @@ ipcMain.handle('start-ai-stream', async (event, chatId: string, message: string,
 	const streamId        = `stream_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 	const abortController = new AbortController();
 	aiStreamControllers.set(streamId, abortController);
-	const [selectedModel, aiQualityProfile] = await Promise.all([
-		settingsService.getSelectedModel(),
-		settingsService.getAiQualityProfile(),
-	]);
-	const log                               = createDebugLogger({chatId, runId: streamId, provider: selectedModel, phase: 'ipc'});
-	const startMs                           = Date.now();
-	let firstTokenMs: number | null         = null;
-	let textChunkCount                      = 0;
-	let thinkingCount                       = 0;
-	let toolCallCount                       = 0;
-	const toolStartMap                      = new Map<string, number>();
-	const toolStats                         = new Map<string, { count: number; totalMs: number; maxMs: number }>();
-	let totalToolMs                         = 0;
+	const aiQualityProfile          = await settingsService.getAiQualityProfile();
+	const log                       = createDebugLogger({chatId, runId: streamId, provider: 'claude', phase: 'ipc'});
+	const startMs                   = Date.now();
+	let firstTokenMs: number | null = null;
+	let textChunkCount              = 0;
+	let thinkingCount               = 0;
+	let toolCallCount               = 0;
+	const toolStartMap              = new Map<string, number>();
+	const toolStats                 = new Map<string, { count: number; totalMs: number; maxMs: number }>();
+	let totalToolMs                 = 0;
 
 	const onProgress = (status: string) => {
 		event.sender.send('message-progress', {chatId, streamId, status});
@@ -617,7 +586,6 @@ ipcMain.handle('start-ai-stream', async (event, chatId: string, message: string,
 			qualityProfile: aiQualityProfile,
 		},
 	});
-	log('info', 'Latency Flags', 'Active latency flags', JSON.stringify(LATENCY_FLAGS), {phase: 'prepare'});
 
 	const onDebugLog = (type: DebugLogType, category: string, messageText: string, details?: string) => {
 		log(type, category, messageText, details);
@@ -630,7 +598,7 @@ ipcMain.handle('start-ai-stream', async (event, chatId: string, message: string,
 		}
 		switch (aiEvent.type) {
 			case 'RUN_STARTED':
-				log('info', 'TanStack AI', `Stream started (${streamId})`, formatTanStackEventDetails(aiEvent), {
+				log('info', 'Claude', `Stream started (${streamId})`, formatAiEventDetails(aiEvent), {
 					phase : 'stream',
 					status: 'started',
 				});
@@ -639,7 +607,7 @@ ipcMain.handle('start-ai-stream', async (event, chatId: string, message: string,
 				textChunkCount += 1;
 				if (firstTokenMs === null) {
 					firstTokenMs = Date.now();
-					log('info', 'TanStack AI', `First token in ${firstTokenMs - startMs} ms`, undefined, {
+					log('info', 'Claude', `First token in ${firstTokenMs - startMs} ms`, undefined, {
 						phase     : 'stream',
 						durationMs: firstTokenMs - startMs,
 					});
@@ -651,7 +619,7 @@ ipcMain.handle('start-ai-stream', async (event, chatId: string, message: string,
 					'info',
 					'AI Thinking',
 					`Thinking step ${thinkingCount} finished`,
-					formatTanStackEventDetails(aiEvent),
+					formatAiEventDetails(aiEvent),
 					{
 						phase : 'stream',
 						status: 'info',
@@ -663,7 +631,7 @@ ipcMain.handle('start-ai-stream', async (event, chatId: string, message: string,
 					'info',
 					'AI Thinking',
 					'Thinking step started',
-					formatTanStackEventDetails(aiEvent),
+					formatAiEventDetails(aiEvent),
 					{
 						phase : 'stream',
 						status: 'started',
@@ -675,7 +643,7 @@ ipcMain.handle('start-ai-stream', async (event, chatId: string, message: string,
 				if (aiEvent.toolCallId) {
 					toolStartMap.set(String(aiEvent.toolCallId), Date.now());
 				}
-				log('tool', 'TanStack AI Tool', `Tool start: ${aiEvent.toolName || 'unknown'}`, formatTanStackEventDetails(aiEvent), {
+				log('tool', 'AI Tool', `Tool start: ${aiEvent.toolName || 'unknown'}`, formatAiEventDetails(aiEvent), {
 					phase   : 'tool',
 					status  : 'started',
 					toolName: aiEvent.toolName || 'unknown',
@@ -693,7 +661,7 @@ ipcMain.handle('start-ai-stream', async (event, chatId: string, message: string,
 					stats.totalMs += durationMs;
 					stats.maxMs      = Math.max(stats.maxMs, durationMs);
 					toolStats.set(toolName, stats);
-					log('tool', 'TanStack AI Tool', `Tool end: ${aiEvent.toolName || 'unknown'} (${durationMs} ms)`, formatTanStackEventDetails(aiEvent), {
+					log('tool', 'AI Tool', `Tool end: ${aiEvent.toolName || 'unknown'} (${durationMs} ms)`, formatAiEventDetails(aiEvent), {
 						phase   : 'tool',
 						status  : 'completed',
 						toolName: aiEvent.toolName || 'unknown',
@@ -701,7 +669,7 @@ ipcMain.handle('start-ai-stream', async (event, chatId: string, message: string,
 					});
 					toolStartMap.delete(toolId);
 				} else {
-					log('tool', 'TanStack AI Tool', `Tool end: ${aiEvent.toolName || 'unknown'}`, formatTanStackEventDetails(aiEvent), {
+					log('tool', 'AI Tool', `Tool end: ${aiEvent.toolName || 'unknown'}`, formatAiEventDetails(aiEvent), {
 						phase   : 'tool',
 						status  : 'completed',
 						toolName: aiEvent.toolName || 'unknown',
@@ -711,12 +679,12 @@ ipcMain.handle('start-ai-stream', async (event, chatId: string, message: string,
 			}
 			case 'RUN_FINISHED': {
 				const totalMs = Date.now() - startMs;
-				log('info', 'TanStack AI', `Stream finished in ${totalMs} ms`, formatTanStackEventDetails(aiEvent), {
+				log('info', 'Claude', `Stream finished in ${totalMs} ms`, formatAiEventDetails(aiEvent), {
 					phase     : 'stream',
 					status    : 'completed',
 					durationMs: totalMs,
 				});
-				log('info', 'TanStack AI', `Chunks: ${textChunkCount} | Thinking steps: ${thinkingCount} | Tools: ${toolCallCount}`, undefined, {
+				log('info', 'Claude', `Chunks: ${textChunkCount} | Thinking steps: ${thinkingCount} | Tools: ${toolCallCount}`, undefined, {
 					phase: 'stream',
 					meta : {
 						textChunks   : textChunkCount,
@@ -724,25 +692,13 @@ ipcMain.handle('start-ai-stream', async (event, chatId: string, message: string,
 						toolCalls    : toolCallCount,
 					},
 				});
-				if (selectedModel === 'openai' && thinkingCount === 0) {
-					log(
-						'info',
-						'AI Thinking',
-						'No visible thinking steps were emitted by OpenAI for this run',
-						'This usually means the provider/model did not stream reasoning summaries for this request.',
-						{
-							phase : 'stream',
-							status: 'info',
-						},
-					);
-				}
 				if (toolStats.size > 0) {
 					const toolSummary = Array.from(toolStats.entries())
 						.sort((a, b) => b[1].totalMs - a[1].totalMs)
 						.slice(0, 5)
 						.map(([name, stats]) => `${name}: ${stats.count} calls, ${stats.totalMs} ms total, ${stats.maxMs} ms max`)
 						.join(' | ');
-					log('info', 'TanStack AI', `Tool time: ${totalToolMs} ms total`, toolSummary, {
+					log('info', 'Claude', `Tool time: ${totalToolMs} ms total`, toolSummary, {
 						phase     : 'stream',
 						durationMs: totalToolMs,
 					});
@@ -750,7 +706,7 @@ ipcMain.handle('start-ai-stream', async (event, chatId: string, message: string,
 				break;
 			}
 			case 'RUN_ERROR':
-				log('error', 'TanStack AI', `Stream error: ${aiEvent.error?.message || 'Unknown error'}`, formatTanStackEventDetails(aiEvent), {
+				log('error', 'Claude', `Stream error: ${aiEvent.error?.message || 'Unknown error'}`, formatAiEventDetails(aiEvent), {
 					phase : 'stream',
 					status: 'failed',
 				});
@@ -762,60 +718,31 @@ ipcMain.handle('start-ai-stream', async (event, chatId: string, message: string,
 
 	void (async () => {
 		try {
-			// Pre-create worktree for the branch if local repo is configured
-			// This ensures code search is instant when AI uses it
+			// Warm up the branch worktree while the model reads the question, so the first
+			// code search does not wait for a checkout.
 			const localRepoUrl = githubService.getLocalRepoUrl();
-			const branch       = chatContext?.githubBranch?.trim();
-			if (localRepoUrl && branch) {
-				const githubConfig    = await githubService.getConfig();
-				const effectiveBranch = branch || githubConfig?.branch || 'main';
-				try {
-					sendDebugLog('info', 'Worktree', `Ensuring worktree exists for branch: ${effectiveBranch}`, `Requested by chat branch override: ${branch}`);
-					const worktreeResult = await githubService.ensureWorktree(effectiveBranch, localRepoUrl, {fetch: true});
-					sendDebugLog(
-						'info',
-						'Worktree',
-						`Worktree ready for branch: ${effectiveBranch}`,
-						`path=${worktreeResult.worktreePath}; existed=${worktreeResult.existed}; fetched=${worktreeResult.fetched}; fetchReason=${worktreeResult.fetchReason}`,
-					);
-				} catch (worktreeError) {
-					const wtMessage = worktreeError instanceof Error ? worktreeError.message : String(worktreeError);
-					sendDebugLog('error', 'Worktree', `Failed to ensure worktree for ${effectiveBranch}`, wtMessage);
-					// Don't fail the whole request - code search will try again later
-				}
-			} else if (localRepoUrl) {
-				sendDebugLog(
-					'info',
-					'Worktree',
-					'No chat-specific branch override was provided',
-					'Code search will fall back to the configured default branch if needed.',
-				);
+			if (localRepoUrl) {
+				void githubService.resolveBranch(chatContext?.githubBranch)
+					.then((branch) => githubService.localRepo.ensureWorktree(localRepoUrl, branch))
+					.then((worktree) => sendDebugLog('info', 'Worktree', `Worktree ready: ${worktree.branch}@${worktree.commit.slice(0, 8)}`, worktree.path))
+					.catch((error) => sendDebugLog('error', 'Worktree', 'Could not prepare worktree', error instanceof Error ? error.message : String(error)));
 			}
 
-			const result = await aiOrchestrator.sendMessage(
-				selectedModel === 'openai' ? 'openai' : 'claude',
-				{
-					chatId,
-					userMessage         : message,
-					databaseIds         : databases,
-					databaseService,
-					githubService,
-					schemaIndexService,
-					spyCodeAiMcpService,
-					chatService,
-					attachmentService,
-					onProgress,
-					conversationHistory : history,
-					databaseName        : chatContext?.databaseName,
-					dbHostOverride      : chatContext?.dbHost,
-					githubBranchOverride: chatContext?.githubBranch,
-					attachments,
-					aiQualityProfile,
-					onDebugLog,
-					onEvent,
-					abortController,
-				},
-			);
+			const result = await claudeService.sendMessage({
+				chatId,
+				userMessage         : message,
+				databaseIds         : databases,
+				conversationHistory : history,
+				databaseName        : chatContext?.databaseName,
+				dbHostOverride      : chatContext?.dbHost,
+				githubBranchOverride: chatContext?.githubBranch,
+				attachments,
+				qualityProfile      : aiQualityProfile,
+				onProgress,
+				onDebugLog,
+				onEvent,
+				signal              : abortController.signal,
+			});
 			if (result && 'needsClarification' in result && result.needsClarification) {
 				log('info', 'Clarification', 'AI requested clarification', result.question, {
 					phase : 'technical',
@@ -825,7 +752,7 @@ ipcMain.handle('start-ai-stream', async (event, chatId: string, message: string,
 				event.sender.send('ai-asking-clarification', {
 					streamId,
 					chatId,
-					provider     : selectedModel,
+					provider     : 'claude',
 					question     : result.question,
 					options      : result.options,
 					allowFreeText: result.allowFreeText,
@@ -835,7 +762,7 @@ ipcMain.handle('start-ai-stream', async (event, chatId: string, message: string,
 					status: 'completed',
 					meta  : {terminal: true},
 				});
-				event.sender.send('ai-finished', {streamId, provider: selectedModel, result});
+				event.sender.send('ai-finished', {streamId, provider: 'claude', result});
 			}
 		} catch (error) {
 			const messageText = error instanceof Error ? error.message : String(error);
@@ -883,27 +810,6 @@ ipcMain.handle('save-api-key', async (_event, apiKey: string) => {
 	}
 });
 
-ipcMain.handle('get-openai-api-key', async () => {
-	return await openaiService.getApiKey();
-});
-
-ipcMain.handle('save-openai-api-key', async (_event, apiKey: string) => {
-	try {
-		await openaiService.saveApiKey(apiKey);
-	} catch (error) {
-		console.error('[Main] Error saving OpenAI API key:', error);
-		throw error;
-	}
-});
-
-ipcMain.handle('get-selected-model', async () => {
-	return await settingsService.getSelectedModel();
-});
-
-ipcMain.handle('save-selected-model', async (_event, model: 'claude' | 'openai') => {
-	await settingsService.saveSelectedModel(model);
-});
-
 ipcMain.handle('get-ai-quality-profile', async () => {
 	return await settingsService.getAiQualityProfile();
 });
@@ -947,10 +853,6 @@ ipcMain.handle('clear-all-chats', async () => {
 	return await chatService.clearAllChats();
 });
 
-ipcMain.handle('set-working-summary', async (_event, chatId: string, text: string) => {
-	return await chatService.setWorkingSummary(chatId, text);
-});
-
 ipcMain.handle('clear-working-summary', async (_event, chatId: string) => {
 	return await chatService.clearWorkingSummary(chatId);
 });
@@ -968,10 +870,35 @@ ipcMain.handle('validate-github-config', async () => {
 	return await githubService.validateConfig();
 });
 
+ipcMain.handle('get-sentry-config', async () => {
+	return await sentryService.getPublicConfig();
+});
+
+ipcMain.handle('save-sentry-config', async (_event, config: { token?: string; orgSlug?: string; baseUrl?: string }) => {
+	await sentryService.saveConfig(config);
+});
+
+ipcMain.handle('validate-sentry-config', async () => {
+	return await sentryService.validate();
+});
+
 ipcMain.handle('get-local-repo-status', async () => {
 	const localRepoUrl = await settingsService.getLocalRepoUrl();
 	githubService.setLocalRepoUrl(localRepoUrl);
-	return await githubService.getLocalRepoStatus();
+	return await githubService.localRepo.getStatus(localRepoUrl);
+});
+
+ipcMain.handle('list-repo-branches', async () => {
+	const localRepoUrl = githubService.getLocalRepoUrl() ?? await settingsService.getLocalRepoUrl();
+	if (!localRepoUrl) {
+		return [];
+	}
+	try {
+		return await githubService.localRepo.listBranches(localRepoUrl);
+	} catch (error) {
+		sendDebugLog('error', 'Git Local Sync', 'Could not list branches', error instanceof Error ? error.message : String(error));
+		return [];
+	}
 });
 
 ipcMain.handle('sync-local-repo', async (_event, url: string) => {
@@ -995,12 +922,9 @@ ipcMain.handle('sync-local-repo', async (_event, url: string) => {
 	try {
 		await settingsService.saveLocalRepoUrl(trimmedUrl);
 		githubService.setLocalRepoUrl(trimmedUrl);
-		const result = await githubService.ensureLocalRepo(trimmedUrl, {
-			fetch     : true,
-			onProgress: (progress) => sendLocalRepoSyncProgress(progress),
-		});
-		sendDebugLog('info', 'Git Local Sync', `Local repository synced at ${result.repoPath}`);
-		return {success: true, repoPath: result.repoPath};
+		const status = await githubService.localRepo.sync(trimmedUrl, (progress) => sendLocalRepoSyncProgress(progress));
+		sendDebugLog('info', 'Git Local Sync', `Local repository synced at ${status.repoPath}`, `branches: ${status.worktrees.map((w) => w.branch).join(', ') || '(none)'}`);
+		return {success: true, repoPath: status.repoPath};
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		sendDebugLog('error', 'Git Local Sync', 'Local repository sync failed', message);
@@ -1009,18 +933,6 @@ ipcMain.handle('sync-local-repo', async (_event, url: string) => {
 });
 
 // Git installation check
-ipcMain.handle('check-git-installed', async () => {
-	const installed = await gitInstallerService.isGitInstalled();
-	const version   = installed ? await gitInstallerService.getGitVersion() : null;
-	return {installed, version};
-});
-
-ipcMain.handle('install-git', async () => {
-	const installed = await gitInstallerService.promptAndInstall((progress) => {
-		sendLocalRepoSyncProgress({stage: progress.stage, percent: progress.percent, message: progress.message});
-	});
-	return {success: installed};
-});
 
 // User settings
 ipcMain.handle('get-user-name', async () => {
@@ -1045,6 +957,9 @@ ipcMain.handle('focus-window', async () => {
 
 // Open external URL in default browser
 ipcMain.handle('open-external-url', async (_event, url: string) => {
+	if (!isWebUrl(url)) {
+		return {success: false, error: 'Only http(s) links can be opened'};
+	}
 	try {
 		await shell.openExternal(url);
 		return {success: true};

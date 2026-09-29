@@ -8,9 +8,9 @@ import type {DatabaseService} from './database-service';
 const gzipAsync   = promisify(zlib.gzip);
 const gunzipAsync = promisify(zlib.gunzip);
 
-export type SchemaIndexSource = 'information_schema' | 'describe_fallback';
+type SchemaIndexSource = 'information_schema' | 'describe_fallback';
 
-export interface SchemaIndexColumn {
+interface SchemaIndexColumn {
 	tableName: string;
 	columnName: string;
 	dataType?: string;
@@ -20,7 +20,7 @@ export interface SchemaIndexColumn {
 	columnComment?: string;
 }
 
-export interface SchemaIndexForeignKey {
+interface SchemaIndexForeignKey {
 	columnName: string;
 	referencedTable: string;
 	referencedColumn: string;
@@ -97,15 +97,6 @@ export class SchemaIndexService {
 	private readonly baseDir: string;
 	private readonly memoryCache: Map<string, { index: SchemaIndexFileV1; loadedAtMs: number; expiresAtMs: number }> = new Map();
 	private readonly cacheTtlMs: number                                                                              = 30 * 60 * 1000;
-	private lastLoadMeta: {
-		configId: string;
-		cacheHit: boolean;
-		durationMs: number;
-		requestedBranch?: string;
-		resolvedBranch?: string;
-		fallbackUsed?: boolean
-	} | null                                                                                                         = null;
-
 	constructor() {
 		this.baseDir = path.join(app.getPath('userData'), 'schema-index');
 	}
@@ -240,26 +231,8 @@ export class SchemaIndexService {
 	}
 
 	async loadIndex(configId: string, options?: SchemaIndexLookupOptions): Promise<SchemaIndexFileV1 | null> {
-		const startMs  = Date.now();
 		const resolved = await this.resolveIndex(configId, options);
-		if (!resolved) {
-			this.lastLoadMeta = {
-				configId,
-				cacheHit       : false,
-				durationMs     : Date.now() - startMs,
-				requestedBranch: normalizeBranch(options?.branch),
-			};
-			return null;
-		}
-		this.lastLoadMeta = {
-			configId,
-			cacheHit       : resolved.cacheHit,
-			durationMs     : Date.now() - startMs,
-			requestedBranch: resolved.requestedBranch,
-			resolvedBranch : resolved.resolvedBranch,
-			fallbackUsed   : resolved.fallbackUsed,
-		};
-		return resolved.index;
+		return resolved ? resolved.index : null;
 	}
 
 	async generateIndex(
@@ -619,15 +592,5 @@ export class SchemaIndexService {
 		return index.tables.find((t) => t.tableName.toLowerCase() === lower) ?? null;
 	}
 
-	getLastLoadMeta(): {
-		configId: string;
-		cacheHit: boolean;
-		durationMs: number;
-		requestedBranch?: string;
-		resolvedBranch?: string;
-		fallbackUsed?: boolean
-	} | null {
-		return this.lastLoadMeta;
-	}
 }
 

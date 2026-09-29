@@ -1,4 +1,4 @@
-import {Fragment, useState, useEffect, JSX} from 'react';
+import {Fragment, JSX, useEffect, useState} from 'react';
 import type {
 	AiQualityProfile,
 	DatabaseConfig,
@@ -9,6 +9,7 @@ import type {
 	SchemaIndexStatus,
 } from '../types';
 import './SettingsView.css';
+import {SentrySettings} from './SentrySettings';
 
 export function SettingsView(): JSX.Element {
 	const [connection, setConnection]                           = useState<DatabaseConfig | null>(null);
@@ -23,10 +24,6 @@ export function SettingsView(): JSX.Element {
 	const [apiKey, setApiKey]                                   = useState('');
 	const [apiKeyStatus, setApiKeyStatus]                       = useState<'loading' | 'saved' | 'error' | 'none'>('loading');
 	const [apiKeyError, setApiKeyError]                         = useState<string>('');
-	const [openAiApiKey, setOpenAiApiKey]                       = useState('');
-	const [openAiApiKeyStatus, setOpenAiApiKeyStatus]           = useState<'loading' | 'saved' | 'error' | 'none'>('loading');
-	const [openAiApiKeyError, setOpenAiApiKeyError]             = useState<string>('');
-	const [selectedModel, setSelectedModel]                     = useState<'claude' | 'openai'>('claude');
 	const [aiQualityProfile, setAiQualityProfile]               = useState<AiQualityProfile>('maximum_accuracy');
 	const [userName, setUserName]                               = useState('');
 	const [userNameStatus, setUserNameStatus]                   = useState<'loading' | 'saved' | 'error' | 'none'>('loading');
@@ -47,6 +44,7 @@ export function SettingsView(): JSX.Element {
 	const [localRepoError, setLocalRepoError]                   = useState<string>('');
 	const [localRepoMessage, setLocalRepoMessage]               = useState<string>('');
 	const [localRepoProgress, setLocalRepoProgress]             = useState<LocalRepoSyncProgress | null>(null);
+	const [repoBranches, setRepoBranches]                       = useState<string[]>([]);
 	const [appVersion, setAppVersion]                           = useState<string>('');
 	const [updateStatus, setUpdateStatus]                       = useState<'checking' | 'available' | 'downloading' | 'ready' | 'none'>('none');
 	const [updateInfo, setUpdateInfo]                           = useState<{ version?: string; progress?: number; error?: string }>({});
@@ -55,8 +53,6 @@ export function SettingsView(): JSX.Element {
 	useEffect(() => {
 		loadConnection();
 		loadApiKey();
-		loadOpenAiApiKey();
-		loadSelectedModel();
 		loadAiQualityProfile();
 		loadUserName();
 		loadGitHubConfig();
@@ -188,31 +184,6 @@ export function SettingsView(): JSX.Element {
 		}
 	}
 
-	async function loadOpenAiApiKey(): Promise<void> {
-		try {
-			const key = await window.electronAPI.getOpenAiApiKey();
-			if (key) {
-				setOpenAiApiKey(key);
-				setOpenAiApiKeyStatus('saved');
-			} else {
-				setOpenAiApiKeyStatus('none');
-			}
-		} catch (error) {
-			console.error('Error loading OpenAI API key:', error);
-			setOpenAiApiKeyStatus('error');
-			setOpenAiApiKeyError(error instanceof Error ? error.message : 'Unknown error');
-		}
-	}
-
-	async function loadSelectedModel(): Promise<void> {
-		try {
-			const model = await window.electronAPI.getSelectedModel();
-			setSelectedModel(model || 'claude');
-		} catch (error) {
-			console.error('Error loading selected model:', error);
-		}
-	}
-
 	async function loadAiQualityProfile(): Promise<void> {
 		try {
 			const profile = await window.electronAPI.getAiQualityProfile();
@@ -220,23 +191,6 @@ export function SettingsView(): JSX.Element {
 		} catch (error) {
 			console.error('Error loading AI quality profile:', error);
 		}
-	}
-
-	async function saveOpenAiApiKeyFunction(): Promise<void> {
-		try {
-			setOpenAiApiKeyError('');
-			await window.electronAPI.saveOpenAiApiKey(openAiApiKey);
-			setOpenAiApiKeyStatus('saved');
-		} catch (error) {
-			console.error('Error saving OpenAI API key:', error);
-			setOpenAiApiKeyStatus('error');
-			setOpenAiApiKeyError(error instanceof Error ? error.message : 'Failed to save OpenAI API key');
-		}
-	}
-
-	async function saveSelectedModelFunction(model: 'claude' | 'openai'): Promise<void> {
-		setSelectedModel(model);
-		await window.electronAPI.saveSelectedModel(model);
 	}
 
 	async function saveAiQualityProfileFunction(profile: AiQualityProfile): Promise<void> {
@@ -327,6 +281,9 @@ export function SettingsView(): JSX.Element {
 			setLocalRepoStatus(status);
 			if (status.url) {
 				setLocalRepoUrl(status.url);
+			}
+			if (status.exists) {
+				setRepoBranches(await window.electronAPI.listRepoBranches());
 			}
 		} catch (error) {
 			console.error('Error loading local repo status:', error);
@@ -491,30 +448,63 @@ export function SettingsView(): JSX.Element {
 
 			<section className="settings-section">
 				<h2>AI Model</h2>
+				<p className="help-text" style={{marginBottom: '20px'}}>
+					Jørgen uses Claude Opus 5 from Anthropic.
+				</p>
 				<div className="form-group">
-					<div style={{display: 'flex', gap: '12px', marginBottom: '20px'}}>
+					<label htmlFor="api-key">Anthropic API Key</label>
+					<input
+						id="api-key"
+						type="password"
+						value={apiKey}
+						onChange={(event) => setApiKey(event.target.value)}
+						placeholder="sk-ant-..."
+					/>
+					<button onClick={saveApiKeyFunction}>
+						Save API Key
+					</button>
+					{apiKeyStatus === 'saved' && (
+						<span className="status success">✓ Saved</span>
+					)}
+					{apiKeyStatus === 'none' && (
+						<span className="status error">⚠ Not configured</span>
+					)}
+					{apiKeyStatus === 'error' && (
+						<span className="status error">⚠ Error: {apiKeyError}</span>
+					)}
+					<p className="help-text" style={{marginTop: '8px'}}>
+						Get your API key from{' '}
+						<a href="https://console.anthropic.com/" target="_blank" rel="noopener noreferrer">
+							console.anthropic.com
+						</a>
+					</p>
+				</div>
+
+				<div className="form-group">
+					<label>Answer Quality</label>
+					<div style={{display: 'flex', gap: '12px', marginBottom: '12px'}}>
 						<label style={{
 							display     : 'flex',
 							alignItems  : 'center',
 							gap         : '8px',
 							cursor      : 'pointer',
 							padding     : '10px 16px',
-							border      : `2px solid ${selectedModel === 'claude' ? 'var(--accent-color)' : 'var(--border-color)'}`,
+							border      : `2px solid ${aiQualityProfile === 'balanced' ? 'var(--accent-color)' : 'var(--border-color)'}`,
 							borderRadius: '8px',
 							flex        : 1,
 						}}>
 							<input
 								type="radio"
-								name="ai-model"
-								value="claude"
-								checked={selectedModel === 'claude'}
-								onChange={() => saveSelectedModelFunction('claude')}
+								name="ai-quality-profile"
+								value="balanced"
+								checked={aiQualityProfile === 'balanced'}
+								onChange={() => saveAiQualityProfileFunction('balanced')}
 							/>
 							<span>
-								<strong>Claude Sonnet</strong>
-								<br/>
-								<small style={{color: 'var(--text-secondary)'}}>Anthropic</small>
-							</span>
+									<strong>Balanced</strong>
+									<br/>
+									<small style={{color: 'var(--text-secondary)'}}>Faster and cheaper; fine for most everyday questions</small>
+								</span>
 						</label>
 						<label style={{
 							display     : 'flex',
@@ -522,144 +512,25 @@ export function SettingsView(): JSX.Element {
 							gap         : '8px',
 							cursor      : 'pointer',
 							padding     : '10px 16px',
-							border      : `2px solid ${selectedModel === 'openai' ? 'var(--accent-color)' : 'var(--border-color)'}`,
+							border      : `2px solid ${aiQualityProfile === 'maximum_accuracy' ? 'var(--accent-color)' : 'var(--border-color)'}`,
 							borderRadius: '8px',
 							flex        : 1,
 						}}>
 							<input
 								type="radio"
-								name="ai-model"
-								value="openai"
-								checked={selectedModel === 'openai'}
-								onChange={() => saveSelectedModelFunction('openai')}
+								name="ai-quality-profile"
+								value="maximum_accuracy"
+								checked={aiQualityProfile === 'maximum_accuracy'}
+								onChange={() => saveAiQualityProfileFunction('maximum_accuracy')}
 							/>
 							<span>
-								<strong>ChatGPT</strong>
-								<br/>
-								<small style={{color: 'var(--text-secondary)'}}>OpenAI</small>
-							</span>
+									<strong>Maximum Accuracy</strong>
+									<br/>
+									<small style={{color: 'var(--text-secondary)'}}>Investigates more thoroughly before answering</small>
+								</span>
 						</label>
 					</div>
 				</div>
-
-				{selectedModel === 'claude' && (
-					<div className="form-group">
-						<label htmlFor="api-key">Anthropic API Key</label>
-						<input
-							id="api-key"
-							type="password"
-							value={apiKey}
-							onChange={(event) => setApiKey(event.target.value)}
-							placeholder="sk-ant-..."
-						/>
-						<button onClick={saveApiKeyFunction}>
-							Save API Key
-						</button>
-						{apiKeyStatus === 'saved' && (
-							<span className="status success">✓ Saved</span>
-						)}
-						{apiKeyStatus === 'none' && (
-							<span className="status error">⚠ Not configured</span>
-						)}
-						{apiKeyStatus === 'error' && (
-							<span className="status error">⚠ Error: {apiKeyError}</span>
-						)}
-						<p className="help-text" style={{marginTop: '8px'}}>
-							Get your API key from{' '}
-							<a href="https://console.anthropic.com/" target="_blank" rel="noopener noreferrer">
-								console.anthropic.com
-							</a>
-						</p>
-					</div>
-				)}
-
-				{selectedModel === 'openai' && (
-					<Fragment>
-						<div className="form-group">
-							<label>OpenAI Quality Profile</label>
-							<div style={{display: 'flex', gap: '12px', marginBottom: '12px'}}>
-								<label style={{
-									display     : 'flex',
-									alignItems  : 'center',
-									gap         : '8px',
-									cursor      : 'pointer',
-									padding     : '10px 16px',
-									border      : `2px solid ${aiQualityProfile === 'balanced' ? 'var(--accent-color)' : 'var(--border-color)'}`,
-									borderRadius: '8px',
-									flex        : 1,
-								}}>
-									<input
-										type="radio"
-										name="openai-quality-profile"
-										value="balanced"
-										checked={aiQualityProfile === 'balanced'}
-										onChange={() => saveAiQualityProfileFunction('balanced')}
-									/>
-									<span>
-										<strong>Balanced</strong>
-										<br/>
-										<small style={{color: 'var(--text-secondary)'}}>Faster replies with lighter investigation</small>
-									</span>
-								</label>
-								<label style={{
-									display     : 'flex',
-									alignItems  : 'center',
-									gap         : '8px',
-									cursor      : 'pointer',
-									padding     : '10px 16px',
-									border      : `2px solid ${aiQualityProfile === 'maximum_accuracy' ? 'var(--accent-color)' : 'var(--border-color)'}`,
-									borderRadius: '8px',
-									flex        : 1,
-								}}>
-									<input
-										type="radio"
-										name="openai-quality-profile"
-										value="maximum_accuracy"
-										checked={aiQualityProfile === 'maximum_accuracy'}
-										onChange={() => saveAiQualityProfileFunction('maximum_accuracy')}
-									/>
-									<span>
-										<strong>Maximum Accuracy</strong>
-										<br/>
-										<small style={{color: 'var(--text-secondary)'}}>More grounding, stronger conclusion checks, lighter rewriting</small>
-									</span>
-								</label>
-							</div>
-							<p className="help-text">
-								Maximum Accuracy is recommended when correctness matters more than speed.
-							</p>
-						</div>
-
-						<div className="form-group">
-							<label htmlFor="openai-api-key">OpenAI API Key</label>
-							<input
-								id="openai-api-key"
-								type="password"
-								value={openAiApiKey}
-								onChange={(event) => setOpenAiApiKey(event.target.value)}
-								placeholder="sk-proj-..."
-							/>
-							<button onClick={saveOpenAiApiKeyFunction}>
-								Save API Key
-							</button>
-							{openAiApiKeyStatus === 'saved' && (
-								<span className="status success">✓ Saved</span>
-							)}
-							{openAiApiKeyStatus === 'none' && (
-								<span className="status error">⚠ Not configured</span>
-							)}
-							{openAiApiKeyStatus === 'error' && (
-								<span className="status error">⚠ Error: {openAiApiKeyError}</span>
-							)}
-							<p className="help-text" style={{marginTop: '8px'}}>
-								Get your API key from{' '}
-								<a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer">
-									platform.openai.com/api-keys
-								</a>
-							</p>
-						</div>
-					</Fragment>
-				)}
 			</section>
 
 			<section className="settings-section">
@@ -670,7 +541,8 @@ export function SettingsView(): JSX.Element {
 					<a href="https://github.com/settings/tokens" target="_blank" rel="noopener noreferrer">
 						github.com/settings/tokens
 					</a>
-					{' '}with "repo" scope.
+					{' '}- classic with "repo" scope, or fine-grained with "Contents: Read-only" on the repository.
+					The token is also used by Local Git Sync.
 				</p>
 
 				<div className="form-group">
@@ -742,6 +614,8 @@ export function SettingsView(): JSX.Element {
 				</div>
 			</section>
 
+			<SentrySettings/>
+
 			<section className="settings-section">
 				<h2>Local Git Sync</h2>
 				<p className="help-text" style={{marginBottom: '20px'}}>
@@ -749,8 +623,8 @@ export function SettingsView(): JSX.Element {
 					The app will sync and use local files for searches when available.
 				</p>
 				<p className="help-text" style={{marginBottom: '20px'}}>
-					Branch handling is automatic: the app creates a local worktree per branch on demand,
-					based on the branch selected in each chat.
+					Branch handling is automatic: each chat's branch is checked out on demand and kept up to date
+					(branches are fetched every few minutes, and all checked-out branches are refreshed on every sync).
 				</p>
 
 				<div className="form-group">
@@ -805,10 +679,38 @@ export function SettingsView(): JSX.Element {
 				{localRepoStatus && (
 					<div className="form-group">
 						{localRepoStatus.exists ? (
-							<div className="status success">
-								✓ Local repo ready at: {localRepoStatus.repoPath}
-								{localRepoStatus.lastSyncIso ? ` (Last sync: ${localRepoStatus.lastSyncIso})` : ''}
-							</div>
+							<Fragment>
+								<div className="status success">
+									✓ Local repo ready at: {localRepoStatus.repoPath}
+									{localRepoStatus.lastFetchIso ? ` (last fetched ${new Date(localRepoStatus.lastFetchIso).toLocaleString()})` : ''}
+								</div>
+								<p className="help-text" style={{marginTop: '8px'}}>
+									Default branch: <strong>{localRepoStatus.defaultBranch || 'unknown'}</strong>
+								</p>
+								{localRepoStatus.worktrees.length > 0 && (
+									<table className="worktree-table"
+									       style={{width: '100%', marginTop: '8px', fontSize: '0.9em', borderCollapse: 'collapse'}}>
+										<thead>
+										<tr style={{textAlign: 'left'}}>
+											<th>Branch</th>
+											<th>Commit</th>
+											<th>Updated</th>
+											<th>Last used</th>
+										</tr>
+										</thead>
+										<tbody>
+										{localRepoStatus.worktrees.map((worktree) => (
+											<tr key={worktree.branch}>
+												<td>{worktree.branch}</td>
+												<td><code>{worktree.commit || '?'}</code></td>
+												<td>{new Date(worktree.lastSyncIso).toLocaleString()}</td>
+												<td>{new Date(worktree.lastUsedIso).toLocaleString()}</td>
+											</tr>
+										))}
+										</tbody>
+									</table>
+								)}
+							</Fragment>
 						) : (
 							<div className="status error">
 								⚠ Local repo not synced yet.
@@ -1031,7 +933,11 @@ export function SettingsView(): JSX.Element {
 								}}
 								onBlur={refreshSchemaIndexStatus}
 								placeholder="e.g. 2026_02 (leave blank for global fallback)"
+								list="repo-branches"
 							/>
+							<datalist id="repo-branches">
+								{repoBranches.map((branch) => <option key={branch} value={branch}/>)}
+							</datalist>
 							<p className="help-text">
 								Create separate schema snapshots per branch when database schema differs between releases.
 								At runtime Jørgen will try chat branch first, then default branch, then a global fallback index.

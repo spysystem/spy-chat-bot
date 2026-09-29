@@ -1,0 +1,234 @@
+/* Categorical slots validated against the message surface (--bg-secondary) in each theme. */
+:root[data-theme="light"] .chart-block {
+	--series-1: #2a78d6;
+	--series-2: #eb6834;
+	--series-3: #1baf7a;
+	--series-4: #eda100;
+	--chart-grid: #e1e4e8;
+	--chart-baseline: #c3c2b7;
+}
+
+:root[data-theme="dark"] .chart-block {
+	--series-1: #3987e5;
+	--series-2: #d95926;
+	--series-3: #199e70;
+	--series-4: #c98500;
+	--chart-grid: #262c36;
+	--chart-baseline: #484f58;
+}
+
+.chart-block {
+	position: relative;
+	margin: 16px 0;
+	width: 100%;
+}
+
+.chart-header {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: 12px;
+	margin-bottom: 8px;
+}
+
+.chart-title {
+	font-weight: 600;
+	color: var(--text-primary);
+}
+
+.chart-unit {
+	font-weight: 400;
+	color: var(--text-secondary);
+}
+
+.chart-toggle {
+	background: transparent;
+	border: 1px solid var(--border-color);
+	color: var(--text-secondary);
+	border-radius: 6px;
+	padding: 2px 10px;
+	font-size: 0.8em;
+	cursor: pointer;
+}
+
+.chart-toggle:hover {
+	color: var(--text-primary);
+	background: var(--bg-hover);
+}
+
+.chart-legend {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 16px;
+	margin-bottom: 6px;
+	font-size: 0.85em;
+	color: var(--text-secondary);
+}
+
+.chart-legend-item {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+}
+
+.chart-key {
+	display: inline-block;
+	flex-shrink: 0;
+}
+
+.chart-key.rect {
+	width: 10px;
+	height: 10px;
+	border-radius: 2px;
+	background: var(--series-color);
+}
+
+.chart-key.line {
+	width: 14px;
+	height: 2px;
+	border-radius: 1px;
+	background: var(--series-color);
+}
+
+.series-1 { --series-color: var(--series-1); }
+.series-2 { --series-color: var(--series-2); }
+.series-3 { --series-color: var(--series-3); }
+.series-4 { --series-color: var(--series-4); }
+
+.chart-block svg {
+	display: block;
+	overflow: visible;
+	font-family: inherit;
+}
+
+.chart-grid {
+	stroke: var(--chart-grid);
+	stroke-width: 1;
+	shape-rendering: crispEdges;
+}
+
+.chart-baseline {
+	stroke: var(--chart-baseline);
+	stroke-width: 1;
+	shape-rendering: crispEdges;
+}
+
+.chart-tick {
+	fill: var(--text-tertiary);
+	font-size: 11px;
+	font-variant-numeric: tabular-nums;
+}
+
+.chart-category {
+	fill: var(--text-secondary);
+	font-size: 12px;
+}
+
+.chart-hit {
+	fill: transparent;
+}
+
+.chart-band {
+	outline: none;
+	cursor: default;
+}
+
+.chart-mark {
+	fill: var(--series-color);
+	transition: opacity 0.1s ease;
+}
+
+.chart-band.active .chart-mark {
+	opacity: 0.8;
+}
+
+.chart-band:focus-visible .chart-hit {
+	fill: var(--bg-hover);
+	opacity: 0.4;
+}
+
+.chart-line {
+	fill: none;
+	stroke: var(--series-color);
+	stroke-width: 2;
+	stroke-linejoin: round;
+	stroke-linecap: round;
+}
+
+.chart-dot {
+	fill: var(--series-color);
+	stroke: var(--bg-secondary);
+	stroke-width: 2;
+}
+
+.chart-crosshair {
+	stroke: var(--chart-baseline);
+	stroke-width: 1;
+	shape-rendering: crispEdges;
+}
+
+.chart-tooltip {
+	position: absolute;
+	pointer-events: none;
+	min-width: 120px;
+	max-width: 240px;
+	background: var(--bg-primary);
+	border: 1px solid var(--border-color);
+	box-shadow: var(--shadow-md);
+	border-radius: 8px;
+	padding: 8px 10px;
+	font-size: 0.85em;
+	z-index: 5;
+	transform: translateY(-100%);
+}
+
+.chart-tooltip-title {
+	color: var(--text-secondary);
+	margin-bottom: 4px;
+}
+
+.chart-tooltip-row {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	color: var(--text-primary);
+	line-height: 1.5;
+}
+
+.chart-tooltip-name {
+	color: var(--text-secondary);
+}
+
+.chart-table-wrapper {
+	max-height: 360px;
+	overflow: auto;
+}
+
+.chart-table {
+	border-collapse: collapse;
+	width: 100%;
+	font-size: 0.9em;
+}
+
+.chart-table th,
+.chart-table td {
+	padding: 4px 10px;
+	border-bottom: 1px solid var(--border-color);
+	text-align: right;
+	font-variant-numeric: tabular-nums;
+}
+
+.chart-table th:first-child,
+.chart-table td:first-child {
+	text-align: left;
+}
+
+.chart-placeholder {
+	margin: 16px 0;
+	padding: 24px;
+	border: 1px dashed var(--border-color);
+	border-radius: 8px;
+	color: var(--text-secondary);
+	text-align: center;
+	font-size: 0.9em;
+}

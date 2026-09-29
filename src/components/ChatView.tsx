@@ -1,12 +1,12 @@
-import {useState, useEffect, useMemo, useRef, JSX} from 'react';
+import {JSX, useEffect, useMemo, useRef, useState} from 'react';
 import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
-import type {AiQualityProfile, AttachmentMeta, Message, DatabaseConfig, SystemDirectorySystem, ChatUpdate} from '../types';
-import type {Chat} from '../types';
+import remarkGfm from 'remark-gfm';
 import {useAiStreams} from '../ai/AiStreamContext';
 import {buildStreamAssistantMessage} from '../ai/stream-message';
 import './ChatView.css';
+import type {AiQualityProfile, AttachmentMeta, Chat, ChatUpdate, DatabaseConfig, Message, SystemDirectorySystem} from '../types';
+import {MarkdownPre} from './ChartBlock';
 import 'highlight.js/styles/github-dark.css';
 
 interface ChatViewProps {
@@ -24,7 +24,6 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 	const [attachmentPreviewMap, setAttachmentPreviewMap] = useState<Map<string, string>>(new Map()); // storedPath -> dataUrl
 	const [attachmentError, setAttachmentError]           = useState<string>('');
 	const [hasApiKey, setHasApiKey]                       = useState(false);
-	const [selectedModel, setSelectedModel]               = useState<'claude' | 'openai'>('claude');
 	const [aiQualityProfile, setAiQualityProfile]         = useState<AiQualityProfile>('maximum_accuracy');
 	const [userName, setUserName]                         = useState<string>('You');
 	const [isInitialized, setIsInitialized]               = useState(false);
@@ -91,8 +90,7 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 		async function initialize() {
 			setIsInitialized(false);
 			await loadConnection();
-			const model = await loadAiSettings();
-			await checkApiKey(model);
+			await Promise.all([loadAiSettings(), checkApiKey()]);
 			await loadUserName();
 			await loadGithubBranch();
 			// Force window focus
@@ -297,22 +295,12 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 		return conn;
 	}
 
-	async function loadAiSettings(): Promise<'claude' | 'openai'> {
-		const [model, profile] = await Promise.all([
-			window.electronAPI.getSelectedModel(),
-			window.electronAPI.getAiQualityProfile(),
-		]);
-		setSelectedModel(model);
-		setAiQualityProfile(profile);
-		return model;
+	async function loadAiSettings(): Promise<void> {
+		setAiQualityProfile(await window.electronAPI.getAiQualityProfile());
 	}
 
-	async function checkApiKey(modelOverride?: 'claude' | 'openai'): Promise<void> {
-		const activeModel = modelOverride || selectedModel;
-		const apiKey      = activeModel === 'openai'
-			? await window.electronAPI.getOpenAiApiKey()
-			: await window.electronAPI.getApiKey();
-		setHasApiKey(!!apiKey);
+	async function checkApiKey(): Promise<void> {
+		setHasApiKey(!!(await window.electronAPI.getApiKey()));
 	}
 
 	async function loadUserName(): Promise<void> {
@@ -472,9 +460,9 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 		setShowSystemResults(false);
 		if (next) {
 			await saveChatUpdate({
-				isDevMode : true,
-				dbHost    : DEV_SQL_HOST,
-				branch    : '',
+				isDevMode: true,
+				dbHost   : DEV_SQL_HOST,
+				branch   : '',
 				// Clear branch because dev DB selection does not guarantee a matching code branch.
 				systemKey : '',
 				systemName: 'Dev',
@@ -582,31 +570,12 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 		setIsSending(true);
 
 		try {
-			// Build conversation history with technical detail (detailedContent)
-			// so the assistant remembers which tables/schemas it discovered earlier.
-			// Send up to 20 messages but truncate very large assistant answers.
-			const MAX_HISTORY_MESSAGES   = 20;
-			const MAX_ASSISTANT_CHAR_LEN = 2000;
-
-			const recentMessages      = newMessages.slice(-MAX_HISTORY_MESSAGES);
-			const conversationHistory = recentMessages.map((m) => {
-				// For assistant messages, prefer detailedContent (contains SQL, tables, schemas)
-				// over the simplified user-friendly content.
-				let text = (m.role === 'assistant' && m.detailedContent)
-					? m.detailedContent
-					: m.content;
-
-				// Truncate very large assistant answers to stay within token limits
-				// but keep enough to preserve table names, queries, and schema info.
-				if (m.role === 'assistant' && text.length > MAX_ASSISTANT_CHAR_LEN) {
-					text = text.substring(0, MAX_ASSISTANT_CHAR_LEN) + '\n\n[... truncated for brevity ...]';
-				}
-
-				return {
-					role   : m.role,
-					content: text,
-				};
-			});
+			// Prior turns only - the message being sent is passed separately. Assistant turns use
+			// detailedContent (answer + queries/files it looked at) so follow-ups keep that context.
+			const conversationHistory = messages.slice(-40).map((m) => ({
+				role   : m.role,
+				content: m.role === 'assistant' && m.detailedContent ? m.detailedContent : m.content,
+			}));
 
 			const effectiveDatabaseName = databaseName.trim() || undefined;
 			const effectiveDbHost       = selectedChat?.dbHost && selectedChat.dbHost.trim() !== ''
@@ -683,12 +652,11 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 	}, [messages, isStreamRunning, streamState?.hasStreamedContent, streamState?.partialText, streamState?.status, streamState?.error]);
 
 	if (!hasApiKey) {
-		const providerLabel = selectedModel === 'openai' ? 'OpenAI' : 'Claude';
 		return (
 			<div className="chat-view">
 				<div className="setup-required">
 					<h2>Setup Required</h2>
-					<p>Please configure your {providerLabel} API key in Settings to start chatting.</p>
+					<p>Please configure your Claude API key in Settings to start chatting.</p>
 				</div>
 			</div>
 		);
@@ -711,13 +679,11 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 			</div>
 			<div className="badge-container">
 				<div className="provider-badge">
-					<span className="provider-name">{selectedModel === 'openai' ? 'ChatGPT' : 'Claude'}</span>
+					<span className="provider-name">Claude Opus 5</span>
 				</div>
-				{selectedModel === 'openai' && (
-					<div className="quality-badge">
-						<span className="quality-name">{aiQualityProfile === 'maximum_accuracy' ? 'Maximum Accuracy' : 'Balanced'}</span>
-					</div>
-				)}
+				<div className="quality-badge">
+					<span className="quality-name">{aiQualityProfile === 'maximum_accuracy' ? 'Maximum Accuracy' : 'Balanced'}</span>
+				</div>
 				{selectedChat?.branch && selectedChat.branch.trim() !== '' && (
 					<div className="branch-badge">
 						<span className="branch-icon">🔀</span>
@@ -931,6 +897,10 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 									<ReactMarkdown
 										remarkPlugins={[remarkGfm]}
 										rehypePlugins={[rehypeHighlight]}
+										components={{
+											pre: MarkdownPre,
+											a  : ({node: _node, ...props}) => <a {...props} target="_blank" rel="noreferrer"/>,
+										}}
 									>
 										{shownText}
 									</ReactMarkdown>

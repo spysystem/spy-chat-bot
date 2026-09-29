@@ -14,7 +14,7 @@ import {SecureStorageService} from './secure-storage-service';
  * Layer 2: Keyword Blacklist - Blocks ALL write operations (INSERT, UPDATE, DELETE, etc.)
  * Layer 3: Multiple Statement Protection - Prevents SQL injection via semicolons
  * Layer 4: MySQL Session Read-Only - Forces MySQL to reject any write attempts at the database level
- * Layer 5: Read-Only Transaction - Starts all connections in read-only transaction mode
+ * Layer 5: Read-Only Transaction - Every query runs inside its own START TRANSACTION READ ONLY ... ROLLBACK
  * Layer 6: Encrypted Password Storage - Database passwords stored using OS-native encryption
  *
  * Even if all application-level checks are bypassed, the MySQL server itself will reject write operations.
@@ -23,7 +23,7 @@ export class DatabaseService {
 	private readonly configPath: string;
 	private readonly queryLogPath: string;
 	private readonly secureStorage: SecureStorageService;
-	private connections: Map<string, mysql.Connection> = new Map();
+	private readonly pools: Map<string, mysql.Pool> = new Map();
 
 	constructor(secureStorage: SecureStorageService) {
 		this.configPath    = path.join(app.getPath('userData'), 'database-configs.json');
@@ -117,12 +117,8 @@ export class DatabaseService {
 
 		if (existingIndex >= 0) {
 			configs[existingIndex] = safeConfig;
-			// Close existing connection so it will be recreated with new config
-			const connection       = this.connections.get(config.id);
-			if (connection) {
-				await connection.end();
-				this.connections.delete(config.id);
-			}
+			// Close existing pools so they are recreated with the new config
+			await this.closePools(config.id);
 		} else {
 			configs.push(safeConfig);
 		}
@@ -155,80 +151,45 @@ export class DatabaseService {
 		}
 	}
 
-	async deleteConfig(id: string): Promise<void> {
-		const configs  = await this.getConfigs();
-		const filtered = configs.filter((c) => c.id !== id);
-
-		// Keep only IDs in plain text
-		const safeConfigs = filtered.map(config => ({
-			id      : config.id,
-			name    : '',
-			host    : '',
-			port    : 0,
-			database: '',
-			username: '',
-			password: '',
-			readOnly: true,
-		}));
-
-		await fs.writeFile(this.configPath, JSON.stringify(safeConfigs, null, 2));
-
-		// Delete encrypted config
-		await this.secureStorage.deleteEncrypted(`db-config-${id}`);
-
-		// Close connection if exists
-		const connection = this.connections.get(id);
-		if (connection) {
-			await connection.end();
-			this.connections.delete(id);
-		}
-	}
-
-	async getConnection(configId: string, databaseName?: string, hostOverride?: string, portOverride?: number): Promise<mysql.Connection> {
-		// Use provided database name, or throw error if none provided
+	private async getPool(configId: string, databaseName?: string, hostOverride?: string, portOverride?: number): Promise<mysql.Pool> {
 		if (!databaseName) {
 			throw new Error('Database name must be provided');
 		}
 
-		// Create unique key for connection cache
-		const connectionKey = `${configId}:${hostOverride ?? 'default'}:${portOverride ?? 'default'}:${databaseName}`;
-
-		// Return existing connection if available
-		if (this.connections.has(connectionKey)) {
-			return this.connections.get(connectionKey)!;
+		const poolKey  = `${configId}:${hostOverride ?? 'default'}:${portOverride ?? 'default'}:${databaseName}`;
+		const existing = this.pools.get(poolKey);
+		if (existing) {
+			return existing;
 		}
 
-		// Get config and create new connection
 		const configs = await this.getConfigs();
 		const config  = configs.find((c) => c.id === configId);
-
 		if (!config) {
 			throw new Error(`Database config not found: ${configId}`);
 		}
 
-		// CRITICAL SECURITY: Create connection with read-only protections
-		const connection = await mysql.createConnection({
-			host    : hostOverride ?? config.host,
-			port    : portOverride ?? config.port,
-			user    : config.username,
-			password: config.password,
-			database: databaseName,
+		// A pool replaces dropped connections (server wait_timeout, network blips) transparently.
+		const pool = mysql.createPool({
+			host           : hostOverride ?? config.host,
+			port           : portOverride ?? config.port,
+			user           : config.username,
+			password       : config.password,
+			database       : databaseName,
+			connectionLimit: 4,
+			enableKeepAlive: true,
+			dateStrings    : true,
 		});
+		this.pools.set(poolKey, pool);
+		return pool;
+	}
 
-		// CRITICAL SECURITY: Force MySQL session to read-only mode
-		// This makes it PHYSICALLY IMPOSSIBLE to write to the database at the MySQL level
-		try {
-			await connection.query('SET SESSION TRANSACTION READ ONLY');
-			// Start a read-only transaction
-			await connection.query('START TRANSACTION READ ONLY');
-		} catch (error) {
-			// If we can't set read-only mode, close connection and fail
-			await connection.end();
-			throw new Error('SECURITY: Failed to enforce read-only mode on database connection');
+	private async closePools(configId: string): Promise<void> {
+		for (const [key, pool] of this.pools) {
+			if (key.startsWith(`${configId}:`)) {
+				this.pools.delete(key);
+				await pool.end().catch(() => undefined);
+			}
 		}
-
-		this.connections.set(connectionKey, connection);
-		return connection;
 	}
 
 	async executeQuery(configId: string, query: string, databaseName?: string, hostOverride?: string, portOverride?: number): Promise<QueryResult> {
@@ -259,7 +220,8 @@ export class DatabaseService {
 				{label: 'CREATE', pattern: /\bCREATE\b/i},
 				{label: 'ALTER', pattern: /\bALTER\b/i},
 				{label: 'TRUNCATE', pattern: /\bTRUNCATE\b/i},
-				{label: 'REPLACE', pattern: /\bREPLACE\b/i},
+				// REPLACE(str, from, to) is a read-only string function; only the statement form writes.
+				{label: 'REPLACE', pattern: /\bREPLACE\b(?!\s*\()/i},
 				{label: 'RENAME', pattern: /\bRENAME\b/i},
 				{label: 'GRANT', pattern: /\bGRANT\b/i},
 				{label: 'REVOKE', pattern: /\bREVOKE\b/i},
@@ -290,25 +252,46 @@ export class DatabaseService {
 				throw new Error(error);
 			}
 
-			// LAYER 4: MySQL enforced read-only transaction (set in getConnection)
-			const connection = await this.getConnection(configId, databaseName, hostOverride, portOverride);
-
-			// Enforce a 60-second per-query timeout to prevent runaway queries.
-			// mysql2 will cancel the query when the timeout is reached.
+			// LAYER 4 + 5: every query runs in its own read-only session and transaction, so
+			// MySQL itself rejects writes and each query sees current data (a long-lived
+			// transaction would pin an old snapshot).
+			const pool             = await this.getPool(configId, databaseName, hostOverride, portOverride);
+			const connection       = await pool.getConnection();
 			const QUERY_TIMEOUT_MS = 60_000;
+			let healthy            = true;
 			let rows: any;
 			let fields: any;
 			try {
-				[rows, fields] = await connection.query({sql: query, timeout: QUERY_TIMEOUT_MS});
-			} catch (queryError) {
-				const msg = queryError instanceof Error ? queryError.message : String(queryError);
-				// Provide a clear timeout message so Claude knows to simplify the query
-				if (msg.includes('timeout') || msg.includes('TIMEOUT') || msg.includes('ETIMEDOUT')) {
-					const timeoutError = `QUERY TIMEOUT: Query exceeded ${QUERY_TIMEOUT_MS / 1000}s limit and was cancelled. Simplify the query: use smaller LIMIT, fewer JOINs, or add WHERE conditions to narrow the data.`;
-					await this.logQuery(query, databaseName, configId, false, timeoutError);
-					throw new Error(timeoutError);
+				try {
+					await connection.query('SET SESSION TRANSACTION READ ONLY');
+					await connection.query('START TRANSACTION READ ONLY');
+				} catch {
+					healthy = false;
+					throw new Error('SECURITY: Failed to enforce read-only mode on database connection');
 				}
-				throw queryError;
+				try {
+					[rows, fields] = await connection.query({sql: query, timeout: QUERY_TIMEOUT_MS});
+				} catch (queryError) {
+					const msg = queryError instanceof Error ? queryError.message : String(queryError);
+					// Provide a clear timeout message so Claude knows to simplify the query
+					if (msg.includes('timeout') || msg.includes('TIMEOUT') || msg.includes('ETIMEDOUT')) {
+						const timeoutError = `QUERY TIMEOUT: Query exceeded ${QUERY_TIMEOUT_MS / 1000}s limit and was cancelled. Simplify the query: use smaller LIMIT, fewer JOINs, or add WHERE conditions to narrow the data.`;
+						await this.logQuery(query, databaseName, configId, false, timeoutError);
+						throw new Error(timeoutError);
+					}
+					throw queryError;
+				}
+			} finally {
+				if (healthy) {
+					await connection.query('ROLLBACK').catch(() => {
+						healthy = false;
+					});
+				}
+				if (healthy) {
+					connection.release();
+				} else {
+					connection.destroy();
+				}
 			}
 
 			const result = {
@@ -331,8 +314,11 @@ export class DatabaseService {
 		}
 	}
 
-	async getTableSchema(configId: string, tableName: string, databaseName?: string, _dbHostOverride?: string | undefined, hostOverride?: string, portOverride?: number): Promise<QueryResult> {
-		return await this.executeQuery(configId, `DESCRIBE ${tableName}`, databaseName, hostOverride, portOverride);
+	async getTableSchema(configId: string, tableName: string, databaseName?: string, hostOverride?: string, portOverride?: number): Promise<QueryResult> {
+		if (!/^[A-Za-z0-9_$]+$/.test(tableName)) {
+			throw new Error(`Invalid table name: ${tableName}`);
+		}
+		return await this.executeQuery(configId, `DESCRIBE \`${tableName}\``, databaseName, hostOverride, portOverride);
 	}
 
 	async listTables(configId: string, databaseName?: string, hostOverride?: string, portOverride?: number): Promise<string[]> {
