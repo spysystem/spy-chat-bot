@@ -1,6 +1,6 @@
 {
 	"name": "spy-chat-bot",
-	"version": "1.3.0",
+	"version": "1.4.0",
 	"description": "Spy Chat Bot Desktop Application",
 	"main": "dist/electron/main.js",
 	"scripts": {

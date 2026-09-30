@@ -1,4 +1,6 @@
 import {Fragment, JSX} from 'react';
+import {Icon} from './Icon';
+import {useI18n} from '../i18n';
 import './UpdateModal.css';
 
 interface UpdateModalProps {
@@ -27,6 +29,8 @@ export function UpdateModal(
 		onDismiss,
 		forceUpdate = false,
 	}: UpdateModalProps): JSX.Element | null {
+	const {t} = useI18n();
+
 	if (!isOpen) {
 		return null;
 	}
@@ -34,22 +38,22 @@ export function UpdateModal(
 	return (
 		<div className="update-modal-overlay">
 			<div className="update-modal">
-				<div className="update-modal-icon">
-					{isReady ? '✅' : isDownloading ? '⏬' : '✨'}
+				<div className={`update-modal-icon ${isReady ? 'ready' : ''}`}>
+					<Icon name={isReady ? 'check' : 'download'} size={24}/>
 				</div>
 
 				<h2 className="update-modal-title">
-					{isReady ? 'Update Ready!' : isDownloading ? 'Downloading Update...' : 'Update Available'}
+					{isReady ? t('update.ready') : isDownloading ? t('update.downloading') : t('update.available')}
 				</h2>
 
 				{!isReady && !isDownloading && (
 					<Fragment>
 						<p className="update-modal-description">
-							A new version of Spørge Jørgen is available: <strong>v{version}</strong>
+							{t('update.newVersion')} <strong>v{version}</strong>
 						</p>
 						{forceUpdate && (
 							<div className="update-modal-warning">
-								⚠️ This update is required to continue using the application
+								{t('update.required')}
 							</div>
 						)}
 					</Fragment>
@@ -58,7 +62,7 @@ export function UpdateModal(
 				{isDownloading && (
 					<Fragment>
 						<p className="update-modal-description">
-							Downloading version <strong>v{version}</strong>
+							{t('update.downloadingVersion')} <strong>v{version}</strong>
 						</p>
 						<div className="update-progress-bar">
 							<div
@@ -73,17 +77,17 @@ export function UpdateModal(
 				{isReady && (
 					<Fragment>
 						<p className="update-modal-description">
-							Version <strong>v{version}</strong> has been downloaded and is ready to install.
+							{t('update.version')} <strong>v{version}</strong> {t('update.readyText')}
 						</p>
 						<p className="update-modal-subdescription">
-							The application will restart to complete the installation.
+							{t('update.restartNote')}
 						</p>
 					</Fragment>
 				)}
 
 				{error && (
 					<div className="update-modal-error">
-						⚠️ Error: {error}
+						{error}
 					</div>
 				)}
 
@@ -91,42 +95,42 @@ export function UpdateModal(
 					{!isReady && !isDownloading && (
 						<Fragment>
 							<button
-								className="update-modal-btn update-modal-btn-primary"
+								className="btn btn-primary"
 								onClick={onDownload}
 							>
-								Download Update
+								{t('update.download')}
 							</button>
 							{!forceUpdate && onDismiss && (
 								<button
-									className="update-modal-btn update-modal-btn-secondary"
+									className="btn"
 									onClick={onDismiss}
 								>
-									Remind Me Later
+									{t('update.later')}
 								</button>
 							)}
 						</Fragment>
 					)}
 
 					{isDownloading && (
-						<button className="update-modal-btn update-modal-btn-secondary" disabled>
-							Downloading...
+						<button className="btn" disabled>
+							{t('update.downloading')}
 						</button>
 					)}
 
 					{isReady && (
 						<Fragment>
 							<button
-								className="update-modal-btn update-modal-btn-primary"
+								className="btn btn-primary"
 								onClick={onInstall}
 							>
-								🚀 Restart and Install
+								{t('update.install')}
 							</button>
 							{!forceUpdate && onDismiss && (
 								<button
-									className="update-modal-btn update-modal-btn-secondary"
+									className="btn"
 									onClick={onDismiss}
 								>
-									Install Later
+									{t('update.installLater')}
 								</button>
 							)}
 						</Fragment>

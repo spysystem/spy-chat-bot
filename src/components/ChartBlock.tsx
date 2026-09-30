@@ -1,4 +1,5 @@
 import {JSX, useEffect, useMemo, useRef, useState} from 'react';
+import {useI18n} from '../i18n';
 import './ChartBlock.css';
 
 interface ChartSeries {
@@ -107,6 +108,7 @@ function ChartBlock({spec}: { spec: ChartSpec }): JSX.Element {
 	const [showTable, setShowTable]     = useState(false);
 	const [tooltip, setTooltip]         = useState<TooltipState | null>(null);
 	const [activeIndex, setActiveIndex] = useState<number | null>(null);
+	const {t}                           = useI18n();
 
 	useEffect(() => {
 		const element = containerRef.current;
@@ -324,7 +326,7 @@ function ChartBlock({spec}: { spec: ChartSpec }): JSX.Element {
 			<figcaption className="chart-header">
 				<span className="chart-title">{spec.title}{spec.unit ? <span className="chart-unit"> ({spec.unit})</span> : null}</span>
 				<button type="button" className="chart-toggle" onClick={() => setShowTable((v) => !v)}>
-					{showTable ? 'Chart' : 'Table'}
+					{showTable ? t('chart.chart') : t('chart.table')}
 				</button>
 			</figcaption>
 			{showLegend && !showTable && (
@@ -357,7 +359,7 @@ function ChartBlock({spec}: { spec: ChartSpec }): JSX.Element {
 					</table>
 				</div>
 			) : (
-				<svg width={width} height={svgHeight} role="img" aria-label={spec.title || 'Chart'}>
+				<svg width={width} height={svgHeight} role="img" aria-label={spec.title || t('chart.chart')}>
 					{plot}
 				</svg>
 			)}

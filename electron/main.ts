@@ -239,9 +239,13 @@ function createWindow(): void {
 	const preloadPath = path.join(__dirname, 'preload.js');
 
 	mainWindow = new BrowserWindow({
-		width         : 1700,
-		height        : 1000,
-		webPreferences: {
+		width          : 1700,
+		height         : 1000,
+		minWidth       : 900,
+		minHeight      : 600,
+		// Matches the renderer's dark background so the window does not flash white while loading.
+		backgroundColor: '#121315',
+		webPreferences : {
 			preload         : preloadPath,
 			nodeIntegration : false,
 			contextIsolation: true,

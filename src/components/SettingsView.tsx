@@ -1,4 +1,4 @@
-import {Fragment, JSX, useEffect, useState} from 'react';
+import {JSX, useEffect, useState} from 'react';
 import type {
 	AiQualityProfile,
 	DatabaseConfig,
@@ -10,8 +10,12 @@ import type {
 } from '../types';
 import './SettingsView.css';
 import {SentrySettings} from './SentrySettings';
+import {SettingsSection, StatusText} from './SettingsSection';
+import {Icon, type IconName} from './Icon';
+import {LANGUAGES, type TranslationKey, useI18n} from '../i18n';
 
 export function SettingsView(): JSX.Element {
+	const {t, language, setLanguage, locale} = useI18n();
 	const [connection, setConnection]                           = useState<DatabaseConfig | null>(null);
 	const [isEditing, setIsEditing]                             = useState<boolean>(false);
 	const [testResult, setTestResult]                           = useState<{ success: boolean; error?: string } | null>(null);
@@ -148,12 +152,12 @@ export function SettingsView(): JSX.Element {
 		setSchemaIndexProgress({stage: 'Starting...', done: 0, total: 1});
 
 		if (!connection) {
-			setSchemaIndexError('No database connection configured.');
+			setSchemaIndexError(t('settings.schema.noConn'));
 			return;
 		}
 		const dbName = schemaIndexDatabaseName.trim();
 		if (!dbName) {
-			setSchemaIndexError('Please enter a database name to index.');
+			setSchemaIndexError(t('settings.schema.noDb'));
 			return;
 		}
 
@@ -315,13 +319,13 @@ export function SettingsView(): JSX.Element {
 		setLocalRepoError('');
 		setLocalRepoMessage('');
 		setLocalRepoSyncing(true);
-		setLocalRepoProgress({stage: 'Starting sync'});
+		setLocalRepoProgress({stage: t('settings.sync.starting')});
 		try {
 			const result = await window.electronAPI.syncLocalRepo(localRepoUrl);
 			if (!result.success) {
-				setLocalRepoError(result.error || 'Failed to sync repository.');
+				setLocalRepoError(result.error || t('settings.sync.failed'));
 			} else {
-				setLocalRepoMessage('Repository synchronized successfully.');
+				setLocalRepoMessage(t('settings.sync.success'));
 				await loadLocalRepoStatus();
 			}
 		} catch (error) {
@@ -342,7 +346,7 @@ export function SettingsView(): JSX.Element {
 		} catch (error) {
 			console.error('Error saving API key:', error);
 			setApiKeyStatus('error');
-			setApiKeyError(error instanceof Error ? error.message : 'Failed to save API key');
+			setApiKeyError(error instanceof Error ? error.message : t('settings.ai.saveFailed'));
 		}
 	}
 
@@ -401,664 +405,597 @@ export function SettingsView(): JSX.Element {
 		window.electronAPI.installUpdate();
 	}
 
+	function scrollToSection(id: string): void {
+		document.getElementById(id)?.scrollIntoView({behavior: 'smooth', block: 'start'});
+	}
+
 	return (
 		<div className="settings-view">
-			<section className="settings-section">
-				<h2>Personalization</h2>
-				<div className="form-group">
-					<label htmlFor="user-name">Your Name</label>
-					<input
-						id="user-name"
-						type="text"
-						value={userName}
-						onChange={(event) => setUserName(event.target.value)}
-						placeholder="Enter your name"
-					/>
-					<button onClick={saveUserNameFunction}>
-						Save Name
+			<nav className="settings-nav">
+				<div className="settings-nav-title">{t('settings.title')}</div>
+				{SETTINGS_NAV.map((item) => (
+					<button key={item.id} onClick={() => scrollToSection(item.id)}>
+						<Icon name={item.icon} size={15}/>
+						{t(item.label)}
 					</button>
-					{userNameStatus === 'saved' && (
-						<span className="status success">✓ Saved</span>
-					)}
-					{userNameStatus === 'none' && (
-						<span className="status error">⚠ Not configured</span>
-					)}
-					{userNameStatus === 'error' && (
-						<span className="status error">⚠ Error saving</span>
-					)}
-				</div>
-				<p className="help-text">
-					This name will be displayed in your chat messages instead of "You"
-				</p>
-			</section>
+				))}
+			</nav>
 
-			<section className="settings-section">
-				<h2>Developer Tools</h2>
-				<div className="form-group">
-					<button
-						onClick={async () => await window.electronAPI.openDebugWindow()}
-					>
-						🐛 Open Debug Console
-					</button>
-					<p className="help-text">
-						Opens a separate window showing all database queries, API calls, and system activity in real-time
-					</p>
-				</div>
-			</section>
+			<div className="settings-content">
+				<header className="settings-header">
+					<h1>{t('settings.title')}</h1>
+					<p>{t('settings.intro')}</p>
+				</header>
 
-			<section className="settings-section">
-				<h2>AI Model</h2>
-				<p className="help-text" style={{marginBottom: '20px'}}>
-					Jørgen uses Claude Opus 5 from Anthropic.
-				</p>
-				<div className="form-group">
-					<label htmlFor="api-key">Anthropic API Key</label>
-					<input
-						id="api-key"
-						type="password"
-						value={apiKey}
-						onChange={(event) => setApiKey(event.target.value)}
-						placeholder="sk-ant-..."
-					/>
-					<button onClick={saveApiKeyFunction}>
-						Save API Key
-					</button>
-					{apiKeyStatus === 'saved' && (
-						<span className="status success">✓ Saved</span>
-					)}
-					{apiKeyStatus === 'none' && (
-						<span className="status error">⚠ Not configured</span>
-					)}
-					{apiKeyStatus === 'error' && (
-						<span className="status error">⚠ Error: {apiKeyError}</span>
-					)}
-					<p className="help-text" style={{marginTop: '8px'}}>
-						Get your API key from{' '}
-						<a href="https://console.anthropic.com/" target="_blank" rel="noopener noreferrer">
-							console.anthropic.com
-						</a>
-					</p>
-				</div>
-
-				<div className="form-group">
-					<label>Answer Quality</label>
-					<div style={{display: 'flex', gap: '12px', marginBottom: '12px'}}>
-						<label style={{
-							display     : 'flex',
-							alignItems  : 'center',
-							gap         : '8px',
-							cursor      : 'pointer',
-							padding     : '10px 16px',
-							border      : `2px solid ${aiQualityProfile === 'balanced' ? 'var(--accent-color)' : 'var(--border-color)'}`,
-							borderRadius: '8px',
-							flex        : 1,
-						}}>
+				<SettingsSection id="settings-profile" title={t('settings.profile.title')} description={t('settings.profile.desc')}>
+					<div className="form-group">
+						<label htmlFor="user-name">{t('settings.profile.name')}</label>
+						<div className="input-row">
 							<input
-								type="radio"
-								name="ai-quality-profile"
-								value="balanced"
-								checked={aiQualityProfile === 'balanced'}
-								onChange={() => saveAiQualityProfileFunction('balanced')}
-							/>
-							<span>
-									<strong>Balanced</strong>
-									<br/>
-									<small style={{color: 'var(--text-secondary)'}}>Faster and cheaper; fine for most everyday questions</small>
-								</span>
-						</label>
-						<label style={{
-							display     : 'flex',
-							alignItems  : 'center',
-							gap         : '8px',
-							cursor      : 'pointer',
-							padding     : '10px 16px',
-							border      : `2px solid ${aiQualityProfile === 'maximum_accuracy' ? 'var(--accent-color)' : 'var(--border-color)'}`,
-							borderRadius: '8px',
-							flex        : 1,
-						}}>
-							<input
-								type="radio"
-								name="ai-quality-profile"
-								value="maximum_accuracy"
-								checked={aiQualityProfile === 'maximum_accuracy'}
-								onChange={() => saveAiQualityProfileFunction('maximum_accuracy')}
-							/>
-							<span>
-									<strong>Maximum Accuracy</strong>
-									<br/>
-									<small style={{color: 'var(--text-secondary)'}}>Investigates more thoroughly before answering</small>
-								</span>
-						</label>
-					</div>
-				</div>
-			</section>
-
-			<section className="settings-section">
-				<h2>GitHub Repository</h2>
-				<p className="help-text" style={{marginBottom: '20px'}}>
-					Connect to your GitHub repository to let Claude read and search your code.
-					Create a Personal Access Token at{' '}
-					<a href="https://github.com/settings/tokens" target="_blank" rel="noopener noreferrer">
-						github.com/settings/tokens
-					</a>
-					{' '}- classic with "repo" scope, or fine-grained with "Contents: Read-only" on the repository.
-					The token is also used by Local Git Sync.
-				</p>
-
-				<div className="form-group">
-					<label htmlFor="github-token">GitHub Token</label>
-					<input
-						id="github-token"
-						type="password"
-						value={githubConfig.token}
-						onChange={(event) => setGithubConfig({...githubConfig, token: event.target.value})}
-						placeholder="ghp_xxxxxxxxxxxxxxxxxxxx"
-					/>
-				</div>
-
-				<div className="form-row">
-					<div className="form-group">
-						<label htmlFor="github-owner">Repository Owner</label>
-						<input
-							id="github-owner"
-							type="text"
-							value={githubConfig.owner}
-							onChange={(event) => setGithubConfig({...githubConfig, owner: event.target.value})}
-							placeholder="your-organization"
-						/>
-					</div>
-
-					<div className="form-group">
-						<label htmlFor="github-repo">Repository Name</label>
-						<input
-							id="github-repo"
-							type="text"
-							value={githubConfig.repo}
-							onChange={(event) => setGithubConfig({...githubConfig, repo: event.target.value})}
-							placeholder="your-repo"
-						/>
-					</div>
-				</div>
-
-				<div className="form-group">
-					<div className="form-btn-flex">
-						<button onClick={saveGitHubConfigFunction}>
-							Save GitHub Configuration
-						</button>
-						<button onClick={testGitHubConnection} disabled={githubValidation.testing}>
-							{githubValidation.testing ? 'Testing...' : 'Test Connection'}
-						</button>
-					</div>
-					{githubStatus === 'saved' && (
-						<span className="status success">✓ Saved</span>
-					)}
-					{githubStatus === 'none' && (
-						<span className="status error">⚠ Not configured</span>
-					)}
-					{githubStatus === 'error' && (
-						<span className="status error">⚠ Error saving</span>
-					)}
-					{githubValidation.result && (
-						<div className="form-group">
-							{githubValidation.result.valid ? (
-								<div className="status success">
-									✓ Connection successful! Authenticated as: {githubValidation.result.user}
-								</div>
-							) : (
-								<div className="status error">
-									⚠ Connection failed: {githubValidation.result.error}
-								</div>
-							)}
-						</div>
-					)}
-				</div>
-			</section>
-
-			<SentrySettings/>
-
-			<section className="settings-section">
-				<h2>Local Git Sync</h2>
-				<p className="help-text" style={{marginBottom: '20px'}}>
-					Keep a local clone of your repository to avoid GitHub API rate limits.
-					The app will sync and use local files for searches when available.
-				</p>
-				<p className="help-text" style={{marginBottom: '20px'}}>
-					Branch handling is automatic: each chat's branch is checked out on demand and kept up to date
-					(branches are fetched every few minutes, and all checked-out branches are refreshed on every sync).
-				</p>
-
-				<div className="form-group">
-					<label htmlFor="local-repo-url">Repository URL</label>
-					<input
-						id="local-repo-url"
-						type="text"
-						value={localRepoUrl}
-						onChange={(event) => setLocalRepoUrl(event.target.value)}
-						placeholder="https://github.com/repo-owner/repo-name.git"
-					/>
-				</div>
-
-				<div className="form-group">
-					<div className="form-btn-flex">
-						<button onClick={syncLocalRepo} disabled={localRepoSyncing}>
-							{localRepoSyncing ? 'Syncing...' : 'Sync Repository'}
-						</button>
-						<button onClick={loadLocalRepoStatus} disabled={localRepoSyncing}>
-							Refresh Status
-						</button>
-					</div>
-					{localRepoMessage && (
-						<span className="status success">✓ {localRepoMessage}</span>
-					)}
-					{localRepoError && (
-						<span className="status error">⚠ {localRepoError}</span>
-					)}
-				</div>
-
-				{localRepoProgress && (
-					<div className="form-group">
-						<div style={{display: 'flex', justifyContent: 'space-between', marginBottom: '6px'}}>
-							<span>{localRepoProgress.stage}</span>
-							{typeof localRepoProgress.percent === 'number' && (
-								<span>{localRepoProgress.percent}%</span>
-							)}
-						</div>
-						<div style={{height: '8px', background: 'var(--border-color)', borderRadius: '4px', overflow: 'hidden'}}>
-							<div
-								style={{
-									height    : '100%',
-									width     : `${localRepoProgress.percent ?? 0}%`,
-									background: 'var(--accent-color)',
-									transition: 'width 0.2s ease',
-								}}
-							/>
-						</div>
-					</div>
-				)}
-
-				{localRepoStatus && (
-					<div className="form-group">
-						{localRepoStatus.exists ? (
-							<Fragment>
-								<div className="status success">
-									✓ Local repo ready at: {localRepoStatus.repoPath}
-									{localRepoStatus.lastFetchIso ? ` (last fetched ${new Date(localRepoStatus.lastFetchIso).toLocaleString()})` : ''}
-								</div>
-								<p className="help-text" style={{marginTop: '8px'}}>
-									Default branch: <strong>{localRepoStatus.defaultBranch || 'unknown'}</strong>
-								</p>
-								{localRepoStatus.worktrees.length > 0 && (
-									<table className="worktree-table"
-									       style={{width: '100%', marginTop: '8px', fontSize: '0.9em', borderCollapse: 'collapse'}}>
-										<thead>
-										<tr style={{textAlign: 'left'}}>
-											<th>Branch</th>
-											<th>Commit</th>
-											<th>Updated</th>
-											<th>Last used</th>
-										</tr>
-										</thead>
-										<tbody>
-										{localRepoStatus.worktrees.map((worktree) => (
-											<tr key={worktree.branch}>
-												<td>{worktree.branch}</td>
-												<td><code>{worktree.commit || '?'}</code></td>
-												<td>{new Date(worktree.lastSyncIso).toLocaleString()}</td>
-												<td>{new Date(worktree.lastUsedIso).toLocaleString()}</td>
-											</tr>
-										))}
-										</tbody>
-									</table>
-								)}
-							</Fragment>
-						) : (
-							<div className="status error">
-								⚠ Local repo not synced yet.
-							</div>
-						)}
-					</div>
-				)}
-			</section>
-
-			<section className="settings-section">
-				<h2>Database Connection</h2>
-				<p className="help-text" style={{marginBottom: '12px'}}>
-					Configure your database connection details. You'll specify the database name in each chat.
-				</p>
-				<p className="help-text" style={{marginBottom: '20px', color: 'var(--success-color)', fontWeight: 'bold'}}>
-					⚠️ All database operations are READ-ONLY. Write operations are NEVER permitted.
-				</p>
-
-				{!connection && !isEditing && (
-					<p className="empty-state">No connection configured. Please configure a connection below.</p>
-				)}
-
-				{connection && !isEditing && (
-					<div className="database-card">
-						<div className="database-info">
-							<h3>{connection.name}</h3>
-							<p>{connection.host}:{connection.port.toString()}</p>
-							<span className="badge">Read-only</span>
-						</div>
-						<div className="database-actions">
-							<button onClick={startEditing}>Edit</button>
-						</div>
-					</div>
-				)}
-
-				{(!connection || isEditing) && (
-					<div className="database-form">
-						<h3>{connection ? 'Edit Connection' : 'Configure Connection'}</h3>
-
-						<div className="form-group">
-							<label htmlFor="db-name">Connection Name</label>
-							<input
-								id="db-name"
+								id="user-name"
 								type="text"
-								value={connection?.name || ''}
-								onChange={(event) =>
-									setConnection({
-										...(connection || {
-											id      : crypto.randomUUID(),
-											host    : 'localhost',
-											port    : 3306,
-											database: '',
-											username: 'root',
-											password: '',
-											readOnly: true, // ALWAYS read-only
-										}), name: event.target.value,
-									})
-								}
-								placeholder="Production Server"
+								value={userName}
+								onChange={(event) => setUserName(event.target.value)}
+								onKeyDown={(event) => event.key === 'Enter' && saveUserNameFunction()}
+								placeholder={t('settings.profile.namePh')}
 							/>
+							<button className="btn btn-primary" onClick={saveUserNameFunction}>{t('common.save')}</button>
 						</div>
+						{userNameStatus === 'saved' && <StatusText ok>{t('common.saved')}</StatusText>}
+						{userNameStatus === 'none' && <StatusText ok={false}>{t('settings.profile.notSet')}</StatusText>}
+						{userNameStatus === 'error' && <StatusText ok={false}>{t('settings.profile.saveErr')}</StatusText>}
+					</div>
 
-						<div className="form-row">
+					<div className="form-group">
+						<label>{t('settings.profile.language')}</label>
+						<div className="segmented" role="radiogroup" aria-label={t('settings.profile.language')}>
+							{LANGUAGES.map((option) => (
+								<button
+									key={option.value}
+									type="button"
+									role="radio"
+									aria-checked={language === option.value}
+									className={language === option.value ? 'active' : ''}
+									onClick={() => setLanguage(option.value)}
+								>
+									{option.label}
+								</button>
+							))}
+						</div>
+					</div>
+				</SettingsSection>
+
+				<SettingsSection id="settings-ai" title={t('settings.ai.title')} description={t('settings.ai.desc')}>
+					<div className="form-group">
+						<label htmlFor="api-key">{t('settings.ai.key')}</label>
+						<div className="input-row">
+							<input
+								id="api-key"
+								type="password"
+								value={apiKey}
+								onChange={(event) => setApiKey(event.target.value)}
+								placeholder="sk-ant-..."
+							/>
+							<button className="btn btn-primary" onClick={saveApiKeyFunction}>{t('common.save')}</button>
+						</div>
+						{apiKeyStatus === 'saved' && <StatusText ok>{t('common.saved')}</StatusText>}
+						{apiKeyStatus === 'none' && <StatusText ok={false}>{t('settings.ai.keyMissing')}</StatusText>}
+						{apiKeyStatus === 'error' && <StatusText ok={false}>{t('settings.ai.keyError', {error: apiKeyError})}</StatusText>}
+						<p className="help-text">
+							{t('settings.ai.keyHelp')}{' '}
+							<a href="https://console.anthropic.com/" target="_blank" rel="noopener noreferrer">console.anthropic.com</a>
+						</p>
+					</div>
+
+					<div className="form-group">
+						<label>{t('settings.ai.quality')}</label>
+						<div className="choice-cards">
+							{QUALITY_OPTIONS.map((option) => (
+								<label key={option.value} className={`choice-card ${aiQualityProfile === option.value ? 'selected' : ''}`}>
+									<input
+										type="radio"
+										name="ai-quality-profile"
+										value={option.value}
+										checked={aiQualityProfile === option.value}
+										onChange={() => saveAiQualityProfileFunction(option.value)}
+									/>
+									<span className="choice-card-title">{t(option.title)}</span>
+									<span className="choice-card-description">{t(option.description)}</span>
+								</label>
+							))}
+						</div>
+					</div>
+				</SettingsSection>
+
+				<SettingsSection
+					id="settings-database"
+					title={t('settings.db.title')}
+					description={t('settings.db.desc')}
+				>
+					<div className="notice success">
+						<Icon name="check" size={15}/>
+						{t('settings.db.readOnly')}
+					</div>
+
+					{connection && !isEditing && (
+						<div className="database-card">
+							<span className="database-card-icon"><Icon name="database" size={18}/></span>
+							<div className="database-info">
+								<h3>{connection.name}</h3>
+								<p>{connection.host}:{connection.port.toString()}</p>
+							</div>
+							<span className="badge">{t('settings.db.badge')}</span>
+							<button className="btn" onClick={startEditing}>{t('settings.db.edit')}</button>
+						</div>
+					)}
+
+					{(!connection || isEditing) && (
+						<div className="database-form">
 							<div className="form-group">
-								<label htmlFor="db-host">Host</label>
+								<label htmlFor="db-name">{t('settings.db.name')}</label>
 								<input
-									id="db-host"
+									id="db-name"
 									type="text"
-									value={connection?.host || 'localhost'}
+									value={connection?.name || ''}
 									onChange={(event) =>
 										setConnection({
 											...(connection || {
 												id      : crypto.randomUUID(),
-												name    : '',
+												host    : 'localhost',
 												port    : 3306,
 												database: '',
 												username: 'root',
 												password: '',
-												readOnly: true,
-											}), host: event.target.value,
+												readOnly: true, // ALWAYS read-only
+											}), name: event.target.value,
 										})
 									}
-									placeholder="localhost"
+									placeholder="Production Server"
 								/>
 							</div>
 
-							<div className="form-group">
-								<label htmlFor="db-port">Port</label>
-								<input
-									id="db-port"
-									type="number"
-									value={connection?.port.toString() || '3306'}
-									onChange={(event) =>
-										setConnection({
-											...(connection || {
-												id      : crypto.randomUUID(),
-												name    : '',
-												host    : 'localhost',
-												database: '',
-												username: 'root',
-												password: '',
-												readOnly: true,
-											}), port: Number.parseInt(event.target.value),
-										})
-									}
-									placeholder="3306"
-								/>
-							</div>
-						</div>
-
-						<div className="form-group">
-							<label htmlFor="db-username">Username</label>
-							<input
-								id="db-username"
-								type="text"
-								value={connection?.username || ''}
-								onChange={(event) =>
-									setConnection({
-										...(connection || {
-											id      : crypto.randomUUID(),
-											name    : '',
-											host    : 'localhost',
-											port    : 3306,
-											database: '',
-											password: '',
-											readOnly: true,
-										}), username: event.target.value,
-									})
-								}
-								placeholder="root"
-							/>
-						</div>
-
-						<div className="form-group">
-							<label htmlFor="db-password">Password</label>
-							<input
-								id="db-password"
-								type="password"
-								value={connection?.password || ''}
-								onChange={(event) =>
-									setConnection({
-										...(connection || {
-											id      : crypto.randomUUID(),
-											name    : '',
-											host    : 'localhost',
-											port    : 3306,
-											database: '',
-											username: 'root',
-											readOnly: true,
-										}), password: event.target.value,
-									})
-								}
-								placeholder="••••••••"
-							/>
-						</div>
-
-
-						{testResult && (
-							<div className={`test-result ${testResult.success ? 'success' : 'error'}`}>
-								{testResult.success ? (
-									<Fragment>✓ Connection successful</Fragment>
-								) : (
-									<Fragment>✗ Connection failed: {testResult.error}</Fragment>
-								)}
-							</div>
-						)}
-
-						<div className="form-actions">
-							{connection && isEditing && (
-								<button onClick={cancelEditing} className="secondary">
-									Cancel
-								</button>
-							)}
-							<button onClick={testConnection}>Test Connection</button>
-							<button onClick={saveConnection} disabled={!testResult?.success}>
-								Save
-							</button>
-						</div>
-					</div>
-				)}
-
-				{connection && !isEditing && (
-					<div className="schema-index-panel">
-						<h3>Database Schema Index (Recommended)</h3>
-						<p className="help-text">
-							Generate a local schema index (tables, columns, keys) for a specific database name.
-							This helps Jørgen find the correct tables/columns with fewer tokens and fewer schema queries.
-						</p>
-
-						<div className="form-group">
-							<label htmlFor="schema-index-database-name">Database name to index</label>
-							<input
-								id="schema-index-database-name"
-								type="text"
-								value={schemaIndexDatabaseName}
-								onChange={(event) => {
-									setSchemaIndexDatabaseName(event.target.value);
-									setSchemaIndexStatus(null);
-									setSchemaIndexError('');
-								}}
-								onBlur={refreshSchemaIndexStatus}
-								placeholder="e.g. spy_live (sample DB)"
-							/>
-							<p className="help-text">
-								This is only used to generate the schema snapshot.
-								Allowed characters: letters, numbers, underscore.
-							</p>
-						</div>
-
-						<div className="form-group">
-							<label htmlFor="schema-index-branch">Branch for this schema index</label>
-							<input
-								id="schema-index-branch"
-								type="text"
-								value={schemaIndexBranch}
-								onChange={(event) => {
-									setSchemaIndexBranch(event.target.value);
-									setSchemaIndexStatus(null);
-									setSchemaIndexError('');
-								}}
-								onBlur={refreshSchemaIndexStatus}
-								placeholder="e.g. 2026_02 (leave blank for global fallback)"
-								list="repo-branches"
-							/>
-							<datalist id="repo-branches">
-								{repoBranches.map((branch) => <option key={branch} value={branch}/>)}
-							</datalist>
-							<p className="help-text">
-								Create separate schema snapshots per branch when database schema differs between releases.
-								At runtime Jørgen will try chat branch first, then default branch, then a global fallback index.
-							</p>
-						</div>
-
-						<div className="form-group schema-index-actions">
-							<button
-								onClick={generateSchemaIndex}
-								disabled={isGeneratingSchemaIndex || !schemaIndexDatabaseName.trim()}
-							>
-								{isGeneratingSchemaIndex ? 'Generating…' : 'Generate Schema Index'}
-							</button>
-							{schemaIndexStatus?.exists && schemaIndexStatus.generatedAtIso && (
-								<span className="status success">
-									✓ Indexed {schemaIndexStatus.tableCount ?? 0} tables ({schemaIndexStatus.source})
-								</span>
-							)}
-						</div>
-
-						{schemaIndexProgress && (
-							<div className="schema-index-progress">
-								<div className="schema-index-progress-row">
-									<div className="schema-index-progress-stage">{schemaIndexProgress.stage}</div>
-									<div className="schema-index-progress-count">
-										{schemaIndexProgress.total > 1 ? `${schemaIndexProgress.done}/${schemaIndexProgress.total}` : ''}
-									</div>
+							<div className="form-row">
+								<div className="form-group">
+									<label htmlFor="db-host">{t('settings.db.host')}</label>
+									<input
+										id="db-host"
+										type="text"
+										value={connection?.host || 'localhost'}
+										onChange={(event) =>
+											setConnection({
+												...(connection || {
+													id      : crypto.randomUUID(),
+													name    : '',
+													port    : 3306,
+													database: '',
+													username: 'root',
+													password: '',
+													readOnly: true,
+												}), host: event.target.value,
+											})
+										}
+										placeholder="localhost"
+									/>
 								</div>
-								<progress
-									value={schemaIndexProgress.total > 0 ? schemaIndexProgress.done : 0}
-									max={schemaIndexProgress.total > 0 ? schemaIndexProgress.total : 1}
+
+								<div className="form-group">
+									<label htmlFor="db-port">{t('settings.db.port')}</label>
+									<input
+										id="db-port"
+										type="number"
+										value={connection?.port.toString() || '3306'}
+										onChange={(event) =>
+											setConnection({
+												...(connection || {
+													id      : crypto.randomUUID(),
+													name    : '',
+													host    : 'localhost',
+													database: '',
+													username: 'root',
+													password: '',
+													readOnly: true,
+												}), port: Number.parseInt(event.target.value),
+											})
+										}
+										placeholder="3306"
+									/>
+								</div>
+							</div>
+
+							<div className="form-row even">
+								<div className="form-group">
+									<label htmlFor="db-username">{t('settings.db.username')}</label>
+									<input
+										id="db-username"
+										type="text"
+										value={connection?.username || ''}
+										onChange={(event) =>
+											setConnection({
+												...(connection || {
+													id      : crypto.randomUUID(),
+													name    : '',
+													host    : 'localhost',
+													port    : 3306,
+													database: '',
+													password: '',
+													readOnly: true,
+												}), username: event.target.value,
+											})
+										}
+										placeholder="root"
+									/>
+								</div>
+
+								<div className="form-group">
+									<label htmlFor="db-password">{t('settings.db.password')}</label>
+									<input
+										id="db-password"
+										type="password"
+										value={connection?.password || ''}
+										onChange={(event) =>
+											setConnection({
+												...(connection || {
+													id      : crypto.randomUUID(),
+													name    : '',
+													host    : 'localhost',
+													port    : 3306,
+													database: '',
+													username: 'root',
+													readOnly: true,
+												}), password: event.target.value,
+											})
+										}
+										placeholder="••••••••"
+									/>
+								</div>
+							</div>
+
+							{testResult && (
+								<div className={`notice ${testResult.success ? 'success' : 'error'}`}>
+									{testResult.success ? t('settings.db.testOk') : t('settings.db.testFailed', {error: testResult.error ?? ''})}
+								</div>
+							)}
+
+							<div className="form-actions">
+								<button className="btn" onClick={testConnection}>{t('common.testConnection')}</button>
+								<button className="btn btn-primary" onClick={saveConnection} disabled={!testResult?.success}
+								        title={testResult?.success ? undefined : t('settings.db.testFirst')}>
+									{t('common.save')}
+								</button>
+								{connection && isEditing && (
+									<button className="btn btn-ghost" onClick={cancelEditing}>{t('common.cancel')}</button>
+								)}
+							</div>
+						</div>
+					)}
+
+					{connection && !isEditing && (
+						<div className="subsection">
+							<h3>{t('settings.schema.title')} <span className="tag">{t('settings.schema.tag')}</span></h3>
+							<p className="help-text">
+								{t('settings.schema.desc')}
+							</p>
+
+							<div className="form-row even">
+								<div className="form-group">
+									<label htmlFor="schema-index-database-name">{t('settings.schema.database')}</label>
+									<input
+										id="schema-index-database-name"
+										type="text"
+										value={schemaIndexDatabaseName}
+										onChange={(event) => {
+											setSchemaIndexDatabaseName(event.target.value);
+											setSchemaIndexStatus(null);
+											setSchemaIndexError('');
+										}}
+										onBlur={refreshSchemaIndexStatus}
+										placeholder={t('settings.schema.dbPh')}
+									/>
+								</div>
+
+								<div className="form-group">
+									<label htmlFor="schema-index-branch">{t('settings.schema.branch')}</label>
+									<input
+										id="schema-index-branch"
+										type="text"
+										value={schemaIndexBranch}
+										onChange={(event) => {
+											setSchemaIndexBranch(event.target.value);
+											setSchemaIndexStatus(null);
+											setSchemaIndexError('');
+										}}
+										onBlur={refreshSchemaIndexStatus}
+										placeholder={t('settings.schema.branchPh')}
+										list="repo-branches"
+									/>
+									<datalist id="repo-branches">
+										{repoBranches.map((branch) => <option key={branch} value={branch}/>)}
+									</datalist>
+								</div>
+							</div>
+
+							<div className="form-actions">
+								<button
+									className="btn btn-primary"
+									onClick={generateSchemaIndex}
+									disabled={isGeneratingSchemaIndex || !schemaIndexDatabaseName.trim()}
+								>
+									{isGeneratingSchemaIndex ? t('settings.schema.running') : t('settings.schema.generate')}
+								</button>
+								{schemaIndexStatus?.exists && schemaIndexStatus.generatedAtIso && (
+									<StatusText ok>{t('settings.schema.indexed', {count: schemaIndexStatus.tableCount ?? 0, source: schemaIndexStatus.source ?? ''})}</StatusText>
+								)}
+							</div>
+
+							{schemaIndexProgress && (
+								<ProgressBar
+									label={schemaIndexProgress.stage}
+									detail={schemaIndexProgress.total > 1 ? `${schemaIndexProgress.done}/${schemaIndexProgress.total}` : ''}
+									percent={schemaIndexProgress.total > 0 ? (schemaIndexProgress.done / schemaIndexProgress.total) * 100 : 0}
 								/>
-							</div>
-						)}
+							)}
 
-						{schemaIndexError && (
-							<div className="schema-index-error">
-								⚠ {schemaIndexError}
-							</div>
-						)}
+							{schemaIndexError && (
+								<div className="notice error">⚠ {schemaIndexError}</div>
+							)}
 
-						{schemaIndexStatus && schemaIndexDatabaseName.trim() && (
-							<div className="schema-index-status">
-								<div><strong>Status:</strong> {schemaIndexStatus.exists ? 'Available' : 'Not generated yet'}</div>
-								<div><strong>Path:</strong> {schemaIndexStatus.filePath}</div>
-								<div><strong>Requested branch:</strong> {schemaIndexStatus.requestedBranch || 'global'}</div>
-								{schemaIndexStatus.exists && (
-									<div><strong>Resolved
-										branch:</strong> {schemaIndexStatus.branch || 'global'}{schemaIndexStatus.fallbackUsed ? ' (fallback used)' : ''}
-									</div>
-								)}
-								{schemaIndexStatus.generatedAtIso && (
-									<div><strong>Generated:</strong> {new Date(schemaIndexStatus.generatedAtIso).toLocaleString()}</div>
-								)}
-							</div>
-						)}
+							{schemaIndexStatus && schemaIndexDatabaseName.trim() && (
+								<dl className="key-values">
+									<dt>{t('settings.schema.status')}</dt>
+									<dd>{schemaIndexStatus.exists ? t('settings.schema.available') : t('settings.schema.missing')}</dd>
+									<dt>{t('settings.schema.requested')}</dt>
+									<dd>{schemaIndexStatus.requestedBranch || t('settings.schema.global')}</dd>
+									{schemaIndexStatus.exists && (
+										<>
+											<dt>{t('settings.schema.resolved')}</dt>
+											<dd>{schemaIndexStatus.branch || t('settings.schema.global')}{schemaIndexStatus.fallbackUsed ? t('settings.schema.fallback') : ''}</dd>
+										</>
+									)}
+									{schemaIndexStatus.generatedAtIso && (
+										<>
+											<dt>{t('settings.schema.generated')}</dt>
+											<dd>{new Date(schemaIndexStatus.generatedAtIso).toLocaleString(locale)}</dd>
+										</>
+									)}
+									<dt>{t('settings.schema.path')}</dt>
+									<dd><code>{schemaIndexStatus.filePath}</code></dd>
+								</dl>
+							)}
+						</div>
+					)}
+				</SettingsSection>
+
+				<SettingsSection
+					id="settings-github"
+					title={t('settings.github.title')}
+					description={
+						<>
+							{t('settings.github.desc1')}{' '}
+							<a href="https://github.com/settings/tokens" target="_blank" rel="noopener noreferrer">github.com/settings/tokens</a>
+							{' '}{t('settings.github.desc2')}
+						</>
+					}
+				>
+					<div className="form-group">
+						<label htmlFor="github-token">{t('settings.github.token')}</label>
+						<input
+							id="github-token"
+							type="password"
+							value={githubConfig.token}
+							onChange={(event) => setGithubConfig({...githubConfig, token: event.target.value})}
+							placeholder="ghp_xxxxxxxxxxxxxxxxxxxx"
+						/>
 					</div>
-				)}
-			</section>
 
-			<section className="settings-section">
-				<h2>Updates & About</h2>
-				<div className="form-group">
-					<label>Current Version</label>
-					<div className="version-info">
-						<span className="version-number">v{appVersion || 'Loading...'}</span>
+					<div className="form-row even">
+						<div className="form-group">
+							<label htmlFor="github-owner">{t('settings.github.owner')}</label>
+							<input
+								id="github-owner"
+								type="text"
+								value={githubConfig.owner}
+								onChange={(event) => setGithubConfig({...githubConfig, owner: event.target.value})}
+								placeholder="your-organization"
+							/>
+						</div>
+
+						<div className="form-group">
+							<label htmlFor="github-repo">{t('settings.github.repo')}</label>
+							<input
+								id="github-repo"
+								type="text"
+								value={githubConfig.repo}
+								onChange={(event) => setGithubConfig({...githubConfig, repo: event.target.value})}
+								placeholder="your-repo"
+							/>
+						</div>
 					</div>
-				</div>
 
-				<div className="form-group">
-					<button
-						onClick={checkForUpdates}
-						disabled={isCheckingUpdate || updateStatus === 'downloading'}
-					>
-						{isCheckingUpdate ? '⏳ Checking...' : '🔍 Check for Updates'}
-					</button>
+					<div className="form-actions">
+						<button className="btn btn-primary" onClick={saveGitHubConfigFunction}>{t('common.save')}</button>
+						<button className="btn" onClick={testGitHubConnection} disabled={githubValidation.testing}>
+							{githubValidation.testing ? t('common.testing') : t('common.testConnection')}
+						</button>
+						{githubStatus === 'saved' && !githubValidation.result && <StatusText ok>{t('common.saved')}</StatusText>}
+						{githubStatus === 'none' && <StatusText ok={false}>{t('settings.github.missing')}</StatusText>}
+						{githubStatus === 'error' && <StatusText ok={false}>{t('settings.github.saveErr')}</StatusText>}
+						{githubValidation.result && (githubValidation.result.valid
+							? <StatusText ok>{t('settings.github.connected', {user: githubValidation.result.user ?? ''})}</StatusText>
+							: <StatusText ok={false}>⚠ {githubValidation.result.error}</StatusText>)}
+					</div>
+				</SettingsSection>
+
+				<SettingsSection
+					id="settings-git-sync"
+					title={t('settings.sync.title')}
+					description={t('settings.sync.desc')}
+				>
+					<div className="form-group">
+						<label htmlFor="local-repo-url">{t('settings.sync.url')}</label>
+						<input
+							id="local-repo-url"
+							type="text"
+							value={localRepoUrl}
+							onChange={(event) => setLocalRepoUrl(event.target.value)}
+							placeholder="https://github.com/repo-owner/repo-name.git"
+						/>
+					</div>
+
+					<div className="form-actions">
+						<button className="btn btn-primary" onClick={syncLocalRepo} disabled={localRepoSyncing}>
+							<Icon name="refresh" size={14}/>
+							{localRepoSyncing ? t('settings.sync.syncing') : t('settings.sync.sync')}
+						</button>
+						<button className="btn" onClick={loadLocalRepoStatus} disabled={localRepoSyncing}>{t('settings.sync.refresh')}</button>
+						{localRepoMessage && <StatusText ok>✓ {localRepoMessage}</StatusText>}
+						{localRepoError && <StatusText ok={false}>⚠ {localRepoError}</StatusText>}
+					</div>
+
+					{localRepoProgress && (
+						<ProgressBar
+							label={localRepoProgress.stage}
+							detail={typeof localRepoProgress.percent === 'number' ? `${localRepoProgress.percent}%` : ''}
+							percent={localRepoProgress.percent ?? 0}
+						/>
+					)}
+
+					{localRepoStatus && (localRepoStatus.exists ? (
+						<div className="subsection">
+							<dl className="key-values">
+								<dt>{t('settings.schema.status')}</dt>
+								<dd className="ok">{t('settings.sync.ready')}</dd>
+								<dt>{t('settings.sync.default')}</dt>
+								<dd>{localRepoStatus.defaultBranch || t('settings.sync.unknown')}</dd>
+								{localRepoStatus.lastFetchIso && (
+									<>
+										<dt>{t('settings.sync.lastFetch')}</dt>
+										<dd>{new Date(localRepoStatus.lastFetchIso).toLocaleString(locale)}</dd>
+									</>
+								)}
+								<dt>{t('settings.sync.location')}</dt>
+								<dd><code>{localRepoStatus.repoPath}</code></dd>
+							</dl>
+							{localRepoStatus.worktrees.length > 0 && (
+								<table className="settings-table">
+									<thead>
+									<tr>
+										<th>{t('settings.sync.branch')}</th>
+										<th>{t('settings.sync.commit')}</th>
+										<th>{t('settings.sync.updated')}</th>
+										<th>{t('settings.sync.lastUsed')}</th>
+									</tr>
+									</thead>
+									<tbody>
+									{localRepoStatus.worktrees.map((worktree) => (
+										<tr key={worktree.branch}>
+											<td>{worktree.branch}</td>
+											<td><code>{worktree.commit || '?'}</code></td>
+											<td>{new Date(worktree.lastSyncIso).toLocaleString(locale)}</td>
+											<td>{new Date(worktree.lastUsedIso).toLocaleString(locale)}</td>
+										</tr>
+									))}
+									</tbody>
+								</table>
+							)}
+						</div>
+					) : (
+						<div className="notice warning">{t('settings.sync.notSynced')}</div>
+					))}
+				</SettingsSection>
+
+				<SentrySettings/>
+
+				<SettingsSection
+					id="settings-updates"
+					title={t('settings.updates.title')}
+					description={t('settings.updates.desc')}
+				>
+					<div className="version-row">
+						<div>
+							<div className="version-label">{t('settings.updates.current')}</div>
+							<div className="version-number">v{appVersion || '…'}</div>
+						</div>
+						<button
+							className="btn"
+							onClick={checkForUpdates}
+							disabled={isCheckingUpdate || updateStatus === 'downloading'}
+						>
+							<Icon name="refresh" size={14}/>
+							{isCheckingUpdate ? t('settings.updates.checking') : t('settings.updates.check')}
+						</button>
+					</div>
 
 					{updateStatus === 'available' && updateInfo.version && (
-						<div className="update-available">
-							<p>✨ New version available: v{updateInfo.version}</p>
-							<button onClick={downloadUpdate}>
-								📥 Download Update
+						<div className="notice info">
+							<span>{t('settings.updates.new')} <strong>v{updateInfo.version}</strong></span>
+							<button className="btn btn-primary" onClick={downloadUpdate}>
+								<Icon name="download" size={14}/>
+								{t('settings.updates.download')}
 							</button>
 						</div>
 					)}
 
 					{updateStatus === 'downloading' && (
-						<div className="update-downloading">
-							<p>⏬ Downloading update... {updateInfo.progress || 0}%</p>
-						</div>
+						<ProgressBar label={t('settings.updates.progress')} detail={`${updateInfo.progress || 0}%`} percent={updateInfo.progress || 0}/>
 					)}
 
 					{updateStatus === 'ready' && (
-						<div className="update-ready">
-							<p>✅ Update downloaded and ready to install</p>
-							<button onClick={installUpdate} className="install-button">
-								🚀 Restart and Install
-							</button>
+						<div className="notice success">
+							<span>{t('settings.updates.ready')}</span>
+							<button className="btn btn-primary" onClick={installUpdate}>{t('settings.updates.install')}</button>
 						</div>
 					)}
 
 					{updateStatus === 'none' && !isCheckingUpdate && updateInfo.version && !updateInfo.error && (
-						<div className="update-current">
-							<p>✓ You are running the latest version</p>
-						</div>
+						<div className="notice success">{t('settings.updates.latest')}</div>
 					)}
 
 					{updateInfo.error && (
-						<div className="update-error">
-							<p>⚠ Error: {updateInfo.error}</p>
-						</div>
+						<div className="notice error">⚠ {updateInfo.error}</div>
 					)}
-				</div>
+				</SettingsSection>
 
-				<div className="form-group">
-					<p className="help-text">
-						Spørge Jørgen automatically checks for updates when you start the app.
-						Updates are downloaded in the background and installed when you restart.
-					</p>
-				</div>
-			</section>
+				<SettingsSection
+					id="settings-developer"
+					title={t('settings.dev.title')}
+					description={t('settings.dev.desc')}
+				>
+					<button className="btn" onClick={async () => await window.electronAPI.openDebugWindow()}>
+						<Icon name="bug" size={15}/>
+						{t('settings.dev.open')}
+					</button>
+				</SettingsSection>
+			</div>
+		</div>
+	);
+}
+
+const SETTINGS_NAV: Array<{ id: string; label: TranslationKey; icon: IconName }> = [
+	{id: 'settings-profile', label: 'settings.nav.profile', icon: 'message'},
+	{id: 'settings-ai', label: 'settings.nav.ai', icon: 'settings'},
+	{id: 'settings-database', label: 'settings.nav.database', icon: 'database'},
+	{id: 'settings-github', label: 'settings.nav.github', icon: 'gitBranch'},
+	{id: 'settings-git-sync', label: 'settings.nav.gitSync', icon: 'refresh'},
+	{id: 'settings-sentry', label: 'settings.nav.sentry', icon: 'alert'},
+	{id: 'settings-updates', label: 'settings.nav.updates', icon: 'download'},
+	{id: 'settings-developer', label: 'settings.nav.developer', icon: 'bug'},
+];
+
+const QUALITY_OPTIONS: Array<{ value: AiQualityProfile; title: TranslationKey; description: TranslationKey }> = [
+	{value: 'balanced', title: 'settings.ai.balanced', description: 'settings.ai.balancedDesc'},
+	{value: 'maximum_accuracy', title: 'settings.ai.max', description: 'settings.ai.maxDesc'},
+];
+
+function ProgressBar({label, detail, percent}: { label: string; detail?: string; percent: number }): JSX.Element {
+	return (
+		<div className="progress">
+			<div className="progress-row">
+				<span>{label}</span>
+				{detail && <span className="progress-detail">{detail}</span>}
+			</div>
+			<div className="progress-track">
+				<div className="progress-fill" style={{width: `${Math.min(100, Math.max(0, percent))}%`}}/>
+			</div>
 		</div>
 	);
 }

@@ -19,7 +19,7 @@ export type DebugLogFn = (
 
 /** What the agent looked at, shown under "Details" and fed to the working summary. */
 export interface EvidenceItem {
-	kind: 'sql' | 'schema' | 'code_search' | 'file' | 'history' | 'csv' | 'knowledge' | 'mcp' | 'sentry';
+	kind: 'sql' | 'schema' | 'code_search' | 'file' | 'history' | 'csv' | 'knowledge' | 'mcp' | 'sentry' | 'web_search' | 'web_page' | 'failed';
 	label: string;
 	detail?: string;
 }
@@ -716,7 +716,7 @@ export async function createAgentTools(ctx: ToolContext): Promise<AgentToolset> 
 				});
 				evidence.push({
 					kind  : 'sentry',
-					label : `search_errors${input.query ? ` "${input.query}"` : ''} (${allSystems ? 'all systems' : systemKey}, ${period})`,
+					label : `search_errors${input.query ? ` "${input.query}"` : ''} (${allSystems || !systemKey ? 'all systems' : systemKey}, ${period})`,
 					detail: `${issues.length} issues`,
 				});
 				if (issues.length === 0) {
@@ -788,6 +788,11 @@ export async function createAgentTools(ctx: ToolContext): Promise<AgentToolset> 
 				} catch (error) {
 					const message = error instanceof Error ? error.message : String(error);
 					onDebugLog?.('error', 'Tool', `${t.definition.name} failed`, message);
+					evidence.push({
+						kind  : 'failed',
+						label : `${t.definition.name} ${JSON.stringify(input ?? {}).slice(0, 120)}`,
+						detail: message.slice(0, 300),
+					});
 					return {content: `Error: ${message}`, isError: true};
 				}
 			},

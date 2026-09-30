@@ -1,6 +1,9 @@
 import {JSX, useEffect, useState} from 'react';
+import {SettingsSection, StatusText} from './SettingsSection';
+import {useI18n} from '../i18n';
 
 export function SentrySettings(): JSX.Element {
+	const {t}                       = useI18n();
 	const [token, setToken]         = useState('');
 	const [orgSlug, setOrgSlug]     = useState('spy-aps');
 	const [baseUrl, setBaseUrl]     = useState('https://us.sentry.io');
@@ -21,7 +24,7 @@ export function SentrySettings(): JSX.Element {
 			await window.electronAPI.saveSentryConfig({token, orgSlug, baseUrl});
 			setToken('');
 			setHasToken(true);
-			setStatus({ok: true, text: 'Saved'});
+			setStatus({ok: true, text: t('settings.sentry.saved')});
 		} catch (error) {
 			setStatus({ok: false, text: error instanceof Error ? error.message : String(error)});
 		}
@@ -32,54 +35,54 @@ export function SentrySettings(): JSX.Element {
 		try {
 			const result = await window.electronAPI.validateSentryConfig();
 			setStatus(result.valid
-				? {ok: true, text: `Connected to ${result.organization}`}
-				: {ok: false, text: result.error || 'Connection failed'});
+				? {ok: true, text: t('settings.sentry.connected', {org: result.organization ?? ''})}
+				: {ok: false, text: result.error || t('settings.sentry.failed')});
 		} finally {
 			setIsTesting(false);
 		}
 	}
 
 	return (
-		<section className="settings-section">
-			<h2>Sentry</h2>
-			<p className="help-text" style={{marginBottom: '20px'}}>
-				Lets Jørgen look up errors for the chat's system (matched on the <code>system_key</code> tag).
-				Create a personal token at{' '}
-				<a href="https://spy-aps.sentry.io/settings/account/api/auth-tokens/" target="_blank" rel="noopener noreferrer">
-					Sentry → User Auth Tokens
-				</a>
-				{' '}with the scopes <code>event:read</code>, <code>org:read</code> and <code>project:read</code>.
-			</p>
-
+		<SettingsSection
+			id="settings-sentry"
+			title="Sentry"
+			description={
+				<>
+					{t('settings.sentry.desc1')} <code>system_key</code>{t('settings.sentry.desc2')}{' '}
+					<a href="https://spy-aps.sentry.io/settings/account/api/auth-tokens/" target="_blank" rel="noopener noreferrer">
+						Sentry → User Auth Tokens
+					</a>
+					{' '}{t('settings.sentry.desc3')} <code>event:read</code>, <code>org:read</code> {t('settings.sentry.and')} <code>project:read</code>.
+				</>
+			}
+		>
 			<div className="form-group">
-				<label htmlFor="sentry-token">Auth Token</label>
+				<label htmlFor="sentry-token">{t('settings.sentry.token')}</label>
 				<input
 					id="sentry-token"
 					type="password"
 					value={token}
 					onChange={(event) => setToken(event.target.value)}
-					placeholder={hasToken ? '•••••••• (saved - leave empty to keep)' : 'sntryu_...'}
+					placeholder={hasToken ? t('settings.sentry.tokenKept') : 'sntryu_...'}
 				/>
 			</div>
 
 			<div className="form-row">
 				<div className="form-group">
-					<label htmlFor="sentry-org">Organization</label>
+					<label htmlFor="sentry-org">{t('settings.sentry.org')}</label>
 					<input id="sentry-org" type="text" value={orgSlug} onChange={(event) => setOrgSlug(event.target.value)}/>
 				</div>
 				<div className="form-group">
-					<label htmlFor="sentry-url">API URL</label>
+					<label htmlFor="sentry-url">{t('settings.sentry.url')}</label>
 					<input id="sentry-url" type="text" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)}/>
 				</div>
 			</div>
 
-			<div className="form-group">
-				<div className="form-btn-flex">
-					<button onClick={save} disabled={!token && !hasToken}>Save Sentry Configuration</button>
-					<button onClick={test} disabled={!hasToken || isTesting}>{isTesting ? 'Testing...' : 'Test Connection'}</button>
-				</div>
-				{status && <span className={`status ${status.ok ? 'success' : 'error'}`}>{status.ok ? '✓' : '⚠'} {status.text}</span>}
+			<div className="form-actions">
+				<button className="btn btn-primary" onClick={save} disabled={!token && !hasToken}>{t('common.save')}</button>
+				<button className="btn" onClick={test} disabled={!hasToken || isTesting}>{isTesting ? t('common.testing') : t('common.testConnection')}</button>
+				{status && <StatusText ok={status.ok}>{status.ok ? '✓' : '⚠'} {status.text}</StatusText>}
 			</div>
-		</section>
+		</SettingsSection>
 	);
 }

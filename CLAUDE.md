@@ -86,6 +86,7 @@ npm run package:linux          # Linux (AppImage)
 - Sentry (when a token is set in Settings): `search_errors` (issues + counts for the chat's system via the `system_key` tag, Discover events API) and `get_error_details` (latest event's stack trace, request, breadcrumbs; server paths trimmed to repo paths)
 - `spy_search_code` / `spy_search_context` when the spy-code-ai MCP server is configured (Cursor MCP config)
 - `search_knowledge` (always) and `ask_clarifying_question` (ends the run and shows the question with clickable options)
+- `web_search` / `web_fetch` (always): Anthropic's server-side tools (`web_search_20260209`, `web_fetch_20260209`), declared in `WEB_TOOLS` in `claude-service.ts`. They run on Anthropic's servers inside the model turn (max 5 searches and 5 fetches per request), so the loop never executes them. The system prompt limits them to questions about things outside SPY (carriers, platforms, EDI, VAT, external error messages) and forbids customer data in search queries. Searches and the pages used go into "Investigation details". Web search must be enabled for the organisation in the Claude Console
 
 **DatabaseService** (`electron/services/database-service.ts`)
 
@@ -200,6 +201,7 @@ When users ask for a list/export/extract ("liste", "udtræk", "oversigt", "expor
 ### Multi-Language Support
 
 - The system prompt tells the model to answer in the user's language while keeping SPY's English UI terms (consignment, style, assortment, ...) untranslated
+- The app UI is Danish by default with English as an option (Settings → Profile → Language, stored in `localStorage`). All UI text lives in `src/i18n.tsx` (`useI18n().t(key)`); the Danish dictionary is typed against the English one, so a missing translation fails the typecheck. Progress statuses are sent in English by the main process and translated by pattern in `translateProgress()` - update `DANISH_PROGRESS` when adding a new `onProgress` text
 
 ### Debug Window
 
@@ -262,6 +264,8 @@ src/
     SettingsView.tsx   # Configuration UI
     DebugView.tsx      # Developer logging window
     ConfirmModal.tsx   # Reusable confirmation dialog
+    Icon.tsx           # Inline SVG icon set (use instead of emoji)
+    SettingsSection.tsx # Card wrapper + status text shared by settings sections
 
 assets/
   prompts/

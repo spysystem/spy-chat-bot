@@ -1,4 +1,4 @@
-import {JSX, useEffect, useMemo, useRef, useState} from 'react';
+import {Fragment, JSX, useEffect, useMemo, useRef, useState} from 'react';
 import ReactMarkdown from 'react-markdown';
 import rehypeHighlight from 'rehype-highlight';
 import remarkGfm from 'remark-gfm';
@@ -7,6 +7,8 @@ import {buildStreamAssistantMessage} from '../ai/stream-message';
 import './ChatView.css';
 import type {AiQualityProfile, AttachmentMeta, Chat, ChatUpdate, DatabaseConfig, Message, SystemDirectorySystem} from '../types';
 import {MarkdownPre} from './ChartBlock';
+import {Icon, type IconName} from './Icon';
+import {type TranslationKey, useI18n} from '../i18n';
 import 'highlight.js/styles/github-dark.css';
 
 interface ChatViewProps {
@@ -25,11 +27,10 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 	const [attachmentError, setAttachmentError]           = useState<string>('');
 	const [hasApiKey, setHasApiKey]                       = useState(false);
 	const [aiQualityProfile, setAiQualityProfile]         = useState<AiQualityProfile>('maximum_accuracy');
-	const [userName, setUserName]                         = useState<string>('You');
+	const [userName, setUserName]                         = useState<string>('');
 	const [isInitialized, setIsInitialized]               = useState(false);
 	const [expandedMessageMap, setExpandedMessageMap]     = useState<Map<number, boolean>>(new Map());
 	const [selectedChat, setSelectedChat]                 = useState<Chat | null>(null);
-	const [githubBranch, setGithubBranch]                 = useState<string>('');
 
 	// System selector state (per chat)
 	const [systems, setSystems]                     = useState<SystemDirectorySystem[]>([]);
@@ -37,12 +38,18 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 	const [systemsError, setSystemsError]           = useState<string>('');
 	const [systemSearch, setSystemSearch]           = useState<string>('');
 	const [showSystemResults, setShowSystemResults] = useState<boolean>(false);
+	const [highlightedSystem, setHighlightedSystem] = useState<number>(0);
 	const [filterActive, setFilterActive]           = useState<boolean>(true);
 	const [filterRestore, setFilterRestore]         = useState<boolean>(false);
 	const [filterDev, setFilterDev]                 = useState<boolean>(false);
+	const [copiedIndex, setCopiedIndex]             = useState<number | null>(null);
+	const [isDragging, setIsDragging]               = useState<boolean>(false);
 
 	const systemSelectorReference = useRef<HTMLDivElement>(null);
+	const systemInputReference    = useRef<HTMLInputElement>(null);
 	const messagesEndReference    = useRef<HTMLDivElement>(null);
+	// Follow new output only while the user is at the bottom, so scrolling up to read is not interrupted.
+	const stickToBottomReference  = useRef<boolean>(true);
 	const previousChatIdReference = useRef<string>(chatId);
 	const textareaReference       = useRef<HTMLTextAreaElement>(null);
 	const fileInputReference      = useRef<HTMLInputElement>(null);
@@ -53,6 +60,7 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 			  getClarificationRequest,
 			  submitClarification,
 		  }                       = useAiStreams();
+	const {t, locale, translateProgress, chatTitle} = useI18n();
 	const streamState             = getChatStreamState(chatId);
 	const clarificationRequest    = getClarificationRequest(chatId);
 	const isStreamRunning         = !!streamState && (streamState.status === 'running' || streamState.status === 'stopping');
@@ -92,7 +100,6 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 			await loadConnection();
 			await Promise.all([loadAiSettings(), checkApiKey()]);
 			await loadUserName();
-			await loadGithubBranch();
 			// Force window focus
 			await window.electronAPI.focusWindow();
 			// Small delay to ensure everything is ready
@@ -143,7 +150,7 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 
 				// Set the database name for this chat
 				setDatabaseName(chat.databaseName ?? '');
-				setSystemSearch(chat.systemName ?? '');
+				setSystemSearch('');
 				setFilterDev(!!chat.isDevMode);
 				setFilterRestore(!!chat.isRestore);
 				setFilterActive(!chat.isRestore);
@@ -181,6 +188,7 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 					setMessages(loadedMessages);
 				}
 				onChatUpdate();
+				textareaReference.current?.focus();
 			})();
 		}
 	}, [chatId, isStreamRunning, onChatUpdate]);
@@ -239,6 +247,9 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 			clearTimeout(scrollTimerReference.current);
 		}
 		scrollTimerReference.current = setTimeout(() => {
+			if (!stickToBottomReference.current) {
+				return;
+			}
 			messagesEndReference.current?.scrollIntoView({behavior: 'smooth'});
 		}, 80);
 		return () => {
@@ -307,13 +318,6 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 		const name = await window.electronAPI.getUserName();
 		if (name) {
 			setUserName(name);
-		}
-	}
-
-	async function loadGithubBranch(): Promise<void> {
-		const config = await window.electronAPI.getGitHubConfig();
-		if (config?.branch) {
-			setGithubBranch(config.branch);
 		}
 	}
 
@@ -427,7 +431,7 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 
 	async function selectSystem(system: SystemDirectorySystem): Promise<void> {
 		const branch = resolveSystemBranch(system);
-		setSystemSearch(system.name);
+		setSystemSearch('');
 		setDatabaseName(system.databaseName);
 		setShowSystemResults(false);
 		await saveChatUpdate({
@@ -457,7 +461,6 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 			setFilterActive(true);
 			setFilterRestore(false);
 		}
-		setShowSystemResults(false);
 		if (next) {
 			await saveChatUpdate({
 				isDevMode: true,
@@ -500,7 +503,7 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 	async function addFileAsAttachment(file: File): Promise<void> {
 		setAttachmentError('');
 		if (file.size > 10 * 1024 * 1024) {
-			setAttachmentError('Attachment too large (max 10 MB).');
+			setAttachmentError(t('chat.attachmentTooLarge'));
 			return;
 		}
 		const buffer = await file.arrayBuffer();
@@ -563,6 +566,7 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 		};
 
 		const newMessages = [...messages, userMessage];
+		stickToBottomReference.current = true;
 		setMessages(newMessages);
 		setInputValue('');
 		clearDraft(chatId);
@@ -581,11 +585,8 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 			const effectiveDbHost       = selectedChat?.dbHost && selectedChat.dbHost.trim() !== ''
 				? selectedChat.dbHost.trim()
 				: (filterDev ? DEV_SQL_HOST : undefined);
-			const hasPinnedSystemBranch = !!(selectedChat?.branch && selectedChat.branch.trim() !== '');
-			const hasSystemContext      = !!(selectedChat?.systemKey || selectedChat?.systemName || selectedChat?.release);
-			const effectiveGithubBranch = hasPinnedSystemBranch
-				? selectedChat!.branch!.trim()
-				: (!hasSystemContext && githubBranch.trim() !== '' ? githubBranch.trim() : undefined);
+			// Without a branch on the chat the main process uses the repository's default branch.
+			const effectiveGithubBranch = selectedChat?.branch?.trim() || undefined;
 
 			// If connection + database are provided, enable database tools.
 			const databaseIds = connection && effectiveDatabaseName ? [connection.id] : [];
@@ -633,8 +634,96 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 		});
 	}
 
+	async function chooseSystemMode(mode: 'active' | 'restore' | 'dev'): Promise<void> {
+		if (mode === 'dev') {
+			if (!filterDev) {
+				await toggleDevMode(true);
+			}
+			return;
+		}
+		if (filterDev) {
+			await toggleDevMode(false);
+		}
+		setSystemFilterMode(mode);
+	}
+
+	function openSystemSearch(): void {
+		setSystemSearch('');
+		setHighlightedSystem(0);
+		setShowSystemResults(true);
+	}
+
+	function focusSystemSearch(): void {
+		systemInputReference.current?.focus();
+	}
+
+	function handleSystemSearchKeyDown(event: React.KeyboardEvent<HTMLInputElement>): void {
+		if (filterDev) {
+			if (event.key === 'Enter') {
+				event.currentTarget.blur();
+			}
+			return;
+		}
+		if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+			event.preventDefault();
+			setShowSystemResults(true);
+			const step = event.key === 'ArrowDown' ? 1 : -1;
+			setHighlightedSystem((current) => Math.min(Math.max(current + step, 0), Math.max(filteredSystems.length - 1, 0)));
+		} else if (event.key === 'Enter' && showSystemResults && filteredSystems[highlightedSystem]) {
+			event.preventDefault();
+			void selectSystem(filteredSystems[highlightedSystem]);
+			event.currentTarget.blur();
+		} else if (event.key === 'Escape') {
+			setShowSystemResults(false);
+			event.currentTarget.blur();
+		}
+	}
+
+	async function copyMessage(index: number, text: string): Promise<void> {
+		await navigator.clipboard.writeText(text);
+		setCopiedIndex(index);
+		setTimeout(() => setCopiedIndex((current) => (current === index ? null : current)), 1500);
+	}
+
+	function applyExamplePrompt(prompt: string): void {
+		setInputValue(prompt);
+		textareaReference.current?.focus();
+	}
+
+	function handleMessagesScroll(event: React.UIEvent<HTMLDivElement>): void {
+		const element                  = event.currentTarget;
+		stickToBottomReference.current = element.scrollHeight - element.scrollTop - element.clientHeight < 120;
+	}
+
+	function handleDragOver(event: React.DragEvent<HTMLDivElement>): void {
+		if (!event.dataTransfer.types.includes('Files')) {
+			return;
+		}
+		event.preventDefault();
+		setIsDragging(true);
+	}
+
+	function handleDragLeave(event: React.DragEvent<HTMLDivElement>): void {
+		if (event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) {
+			return;
+		}
+		setIsDragging(false);
+	}
+
+	async function handleDrop(event: React.DragEvent<HTMLDivElement>): Promise<void> {
+		event.preventDefault();
+		setIsDragging(false);
+		for (const file of Array.from(event.dataTransfer.files)) {
+			// eslint-disable-next-line no-await-in-loop
+			await addFileAsAttachment(file);
+		}
+		textareaReference.current?.focus();
+	}
+
 	const isBusy            = isSending || isStreamRunning;
 	const showLoadingBubble = isSending || (isStreamRunning && !(streamState?.hasStreamedContent));
+	const hasSystem         = databaseName.trim() !== '';
+	const serverHost        = hasSystem ? (selectedChat?.dbHost || connection?.host || '') : '';
 
 	const displayedMessages = useMemo(() => {
 		const base = [...messages];
@@ -655,8 +744,9 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 		return (
 			<div className="chat-view">
 				<div className="setup-required">
-					<h2>Setup Required</h2>
-					<p>Please configure your Claude API key in Settings to start chatting.</p>
+					<span className="brand-mark large">J</span>
+					<h2>{t('chat.setupTitle')}</h2>
+					<p>{t('chat.setupText')}</p>
 				</div>
 			</div>
 		);
@@ -666,234 +756,244 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 		return (
 			<div className="chat-view">
 				<div className="setup-required">
-					<p>Loading...</p>
+					<div className="spinner"/>
 				</div>
 			</div>
 		);
 	}
 
 	return (
-		<div className="chat-view">
-			<div className="chat-title-bar">
-				<div className="chat-title">{selectedChat?.title || 'New Chat'}</div>
-			</div>
-			<div className="badge-container">
-				<div className="provider-badge">
-					<span className="provider-name">Claude Opus 5</span>
-				</div>
-				<div className="quality-badge">
-					<span className="quality-name">{aiQualityProfile === 'maximum_accuracy' ? 'Maximum Accuracy' : 'Balanced'}</span>
-				</div>
-				{selectedChat?.branch && selectedChat.branch.trim() !== '' && (
-					<div className="branch-badge">
-						<span className="branch-icon">🔀</span>
-						<span className="branch-name">{selectedChat.branch}</span>
-					</div>
-				)}
-				{(selectedChat?.dbHost || connection?.host) && (
-					<div className="server-badge">
-						<span className="server-icon">🖥️</span>
-						<span className="server-name">{getServerDisplayName(selectedChat?.dbHost || connection!.host)}</span>
-					</div>
-				)}
-			</div>
+		<div
+			className={`chat-view ${isDragging ? 'dragging' : ''}`}
+			onDragOver={handleDragOver}
+			onDragLeave={handleDragLeave}
+			onDrop={handleDrop}
+		>
+			<header className="chat-header">
+				<div className="chat-title" title={selectedChat?.title}>{chatTitle(selectedChat?.title)}</div>
 
-			<div className="system-selector" ref={systemSelectorReference}>
-				<div className="system-selector-row">
-					<label htmlFor="system-search">System:</label>
-					<div className="system-search-wrapper">
-						<input
-							id="system-search"
-							type="text"
-							value={systemSearch}
-							onChange={(event) => {
-								setSystemSearch(event.target.value);
-								setShowSystemResults(true);
-							}}
-							onFocus={() => setShowSystemResults(true)}
-							className="system-search-input"
-							placeholder={filterDev ? 'Dev mode enabled' : 'Search customer/system (name, key, DB, host)'}
-							disabled={filterDev}
-						/>
-						{selectedChat?.systemUrl && (
-							<button
-								onClick={async () => {
-									if (selectedChat.systemUrl) {
-										await window.electronAPI.openExternalUrl(selectedChat.systemUrl);
-									}
-								}}
-								className="system-url-link"
-								title={`Open system: ${selectedChat.systemUrl}`}
-								type="button"
-							>
-								🌐
-							</button>
-						)}
+				<div className="chat-context">
+					<div className="system-picker" ref={systemSelectorReference}>
+						<label className={`system-search ${hasSystem ? '' : 'empty'}`} title={t('chat.systemTooltip')}>
+							<Icon name={filterDev ? 'database' : 'search'} size={14}/>
+							{filterDev ? (
+								<input
+									ref={systemInputReference}
+									type="text"
+									value={databaseName}
+									onChange={(event) => setDatabaseName(event.target.value)}
+									onBlur={saveDevDatabaseNameOnly}
+									onKeyDown={handleSystemSearchKeyDown}
+									placeholder={t('chat.devDatabase', {host: getServerDisplayName(DEV_SQL_HOST)})}
+								/>
+							) : (
+								<input
+									ref={systemInputReference}
+									type="text"
+									value={showSystemResults ? systemSearch : (selectedChat?.systemName ?? '')}
+									onChange={(event) => {
+										setSystemSearch(event.target.value);
+										setHighlightedSystem(0);
+										setShowSystemResults(true);
+									}}
+									onFocus={openSystemSearch}
+								// Also reopen on click when the field is still focused, e.g. after Escape.
+								onClick={() => !showSystemResults && openSystemSearch()}
+									onKeyDown={handleSystemSearchKeyDown}
+									placeholder={showSystemResults && selectedChat?.systemName ? selectedChat.systemName : t('chat.searchSystem')}
+								/>
+							)}
+						</label>
+
+						<div className="segmented" role="radiogroup" aria-label={t('chat.systemType')}>
+							{(['active', 'restore', 'dev'] as const).map((mode) => {
+								const isActive = mode === 'dev' ? filterDev : (!filterDev && (mode === 'active' ? filterActive : filterRestore));
+								return (
+									<button
+										key={mode}
+										type="button"
+										role="radio"
+										aria-checked={isActive}
+										className={isActive ? 'active' : ''}
+										onClick={async () => {
+											await chooseSystemMode(mode);
+											// Dev swaps the input element, so focus after the next render.
+											requestAnimationFrame(focusSystemSearch);
+										}}
+									>
+										{t(mode === 'active' ? 'chat.modeActive' : mode === 'restore' ? 'chat.modeRestore' : 'chat.modeDev')}
+									</button>
+								);
+							})}
+						</div>
 
 						{!filterDev && showSystemResults && (
 							<div className="system-results">
 								{systemsLoading && (
-									<div className="system-results-row">Loading systems…</div>
+									<div className="system-results-row">{t('chat.loadingSystems')}</div>
 								)}
 								{systemsError && (
-									<div className="system-results-row system-results-error">⚠ {systemsError}</div>
+									<div className="system-results-row system-results-error">{systemsError}</div>
 								)}
 								{!systemsLoading && !systemsError && filteredSystems.length === 0 && (
-									<div className="system-results-row">No matches.</div>
+									<div className="system-results-row">{t('chat.noSystems')}</div>
 								)}
-								{filteredSystems.map((s) => (
+								{filteredSystems.map((s, index) => (
 									<button
 										type="button"
 										key={s.systemKey}
-										className="system-result-item"
+										className={[
+											'system-result-item',
+											selectedChat?.systemKey === s.systemKey ? 'selected' : '',
+											index === highlightedSystem ? 'highlighted' : '',
+										].join(' ')}
+										ref={(element) => {
+											if (index === highlightedSystem) {
+												element?.scrollIntoView({block: 'nearest'});
+											}
+										}}
+										onMouseEnter={() => setHighlightedSystem(index)}
 										onMouseDown={(e) => {
 											// Select on mousedown so blur/click timing never cancels selection.
 											e.preventDefault();
 											e.stopPropagation();
 											void selectSystem(s);
+											systemInputReference.current?.blur();
 										}}
 										onClick={(e) => e.preventDefault()}
 										title={`${s.systemKey} • ${s.databaseName} • ${s.serverHost} • ${s.release ?? ''}`}
 									>
 										<div className="system-result-main">
 											<div className="system-result-name">{s.name}</div>
-											<div className="system-result-meta">{s.databaseName} @ {getServerDisplayName(s.serverHost)}</div>
+											<div className="system-result-meta">{s.databaseName} · {getServerDisplayName(s.serverHost)}</div>
 										</div>
-										<div className="system-result-release">{s.release ?? ''}</div>
+										{s.release && <div className="system-result-release">{s.release}</div>}
 									</button>
 								))}
 							</div>
 						)}
 					</div>
 
-					<div className="system-filters">
-						<label className={`system-checkbox ${filterActive ? 'checked' : ''}`}>
-							<input
-								type="checkbox"
-								checked={filterActive}
-								onChange={(e) => {
-									if (e.target.checked) {
-										setSystemFilterMode('active');
-									}
-								}}
-								disabled={filterDev}
-							/>
-							<span>Active</span>
-						</label>
-						<label className={`system-checkbox ${filterRestore ? 'checked' : ''}`}>
-							<input
-								type="checkbox"
-								checked={filterRestore}
-								onChange={(e) => {
-									if (e.target.checked) {
-										setSystemFilterMode('restore');
-									}
-								}}
-								disabled={filterDev}
-							/>
-							<span>Restore</span>
-						</label>
-						<label className={`system-checkbox ${filterDev ? 'checked' : ''}`}>
-							<input
-								type="checkbox"
-								checked={filterDev}
-								onChange={(e) => void toggleDevMode(e.target.checked)}
-							/>
-							<span>Dev</span>
-						</label>
-					</div>
+					{selectedChat?.branch && selectedChat.branch.trim() !== '' && (
+						<span className="context-chip" title={t('chat.branchTooltip')}>
+							<Icon name="gitBranch" size={13}/>
+							{selectedChat.branch}
+						</span>
+					)}
+					{serverHost && (
+						<span className="context-chip" title={t('chat.serverTooltip', {host: serverHost})}>
+							<Icon name="server" size={13}/>
+							{getServerDisplayName(serverHost)}
+						</span>
+					)}
+					{selectedChat?.systemUrl && (
+						<button
+							type="button"
+							className="icon-btn"
+							onClick={async () => {
+								if (selectedChat.systemUrl) {
+									await window.electronAPI.openExternalUrl(selectedChat.systemUrl);
+								}
+							}}
+							title={t('chat.openSystem', {url: selectedChat.systemUrl})}
+						>
+							<Icon name="externalLink" size={15}/>
+						</button>
+					)}
 				</div>
+			</header>
 
-				{filterDev && (
-					<div className="system-selector-row">
-						<label htmlFor="dev-database-name">Database:</label>
-						<input
-							id="dev-database-name"
-							type="text"
-							value={databaseName}
-							onChange={(event) => setDatabaseName(event.target.value)}
-							onBlur={saveDevDatabaseNameOnly}
-							className="system-search-input"
-							placeholder="Enter database name"
-						/>
-						<div className="system-dev-host">
-							Host: <span className="system-dev-host-value">{DEV_SQL_HOST}</span>
-						</div>
-					</div>
-				)}
-
-			</div>
-
-			<div className="messages">
-				{messages.length === 0 && (
-					<div className="welcome">
-						<h2>Welcome to Spørge Jørgen</h2>
-						<p>Ask any question, Jørgen can help you!</p>
-					</div>
-				)}
-
-				{displayedMessages.map((message, index) => {
-					const detailedText = message.role === 'assistant' ? (message.detailedContent || '').trim() : '';
-					const hasDetailed  = detailedText !== '';
-					const isExpanded   = expandedMessageMap.get(index) || false;
-					const shownText    = (hasDetailed && isExpanded) ? detailedText : message.content;
-
-					return (
-						<div key={index} className={`message ${message.role}`}>
-							<div className="message-header">
-								<div className="message-avatar">
-									{message.role === 'user' ? '👤' : '🤖'}
-								</div>
-								<div className="message-info">
-									<strong>{message.role === 'user' ? userName : 'Jørgen'}</strong>
-									<span className="timestamp">
-										{message.timestamp.toLocaleTimeString()}
-									</span>
-								</div>
-								{hasDetailed && (
-									<div className="message-actions">
-										<button
-											className="details-button"
-											onClick={() => toggleExpanded(index)}
-											title={isExpanded ? 'Show a short answer' : 'Show a detailed answer'}
-										>
-											{isExpanded ? 'Short' : 'Details'}
-										</button>
-									</div>
-								)}
+			<div className="messages" onScroll={handleMessagesScroll}>
+				<div className="messages-inner">
+					{messages.length === 0 && !isBusy && (
+						<div className="welcome">
+							<span className="brand-mark large">J</span>
+							<h2>{t('chat.welcomeTitle')}</h2>
+							{hasSystem ? (
+								<p>
+									{t('chat.welcomeSystem').split('{system}').map((part, index) => (
+										<Fragment key={index}>
+											{index > 0 && <strong>{filterDev ? databaseName : selectedChat?.systemName}</strong>}
+											{part}
+										</Fragment>
+									))}
+								</p>
+							) : (
+								<>
+									<p>
+										{filterDev
+											? t('chat.welcomeDevDatabase', {host: DEV_SQL_HOST})
+											: t('chat.welcomePickSystem')}
+									</p>
+									<button className="btn btn-primary" onClick={focusSystemSearch}>
+										<Icon name={filterDev ? 'database' : 'search'}/>
+										{filterDev ? t('chat.enterDatabase') : t('chat.findSystem')}
+									</button>
+								</>
+							)}
+							<div className="example-prompts">
+								{EXAMPLE_PROMPTS.map((example) => (
+									<button key={example.text} className="example-prompt" onClick={() => applyExamplePrompt(t(example.text))}>
+										<Icon name={example.icon} size={16}/>
+										<span>{t(example.text)}</span>
+									</button>
+								))}
 							</div>
-							<div className="message-content">
-								{message.attachments && message.attachments.length > 0 && (
-									<div className="message-attachments">
-										{message.attachments.map((att) => {
-											const isImage = att.mimeType.startsWith('image/');
-											const preview = isImage ? attachmentPreviewMap.get(att.storedPath) : undefined;
-											return (
-												<div key={att.id} className="message-attachment">
-													{isImage && preview && (
-														<img
-															src={preview}
-															alt={att.originalName}
-															className="attachment-image"
-															onClick={async () => await window.electronAPI.openAttachment(att.storedPath)}
-														/>
-													)}
-													<div className="attachment-meta">
-														<div className="attachment-name">{att.originalName}</div>
-														<div className="attachment-size">{Math.round(att.sizeBytes / 1024)} KB</div>
-													</div>
-													<button
-														className="attachment-open"
-														onClick={async () => await window.electronAPI.openAttachment(att.storedPath)}
-													>
-														Open
-													</button>
-												</div>
-											);
-										})}
-									</div>
-								)}
-								{message.role === 'assistant' ? (
+						</div>
+					)}
+
+					{displayedMessages.map((message, index) => {
+						const detailedText = message.role === 'assistant' ? (message.detailedContent || '').trim() : '';
+						const hasDetailed  = detailedText !== '';
+						const isExpanded   = expandedMessageMap.get(index) || false;
+						const shownText    = (hasDetailed && isExpanded) ? detailedText : message.content;
+						const isStreaming  = isStreamRunning && index === messages.length;
+
+						const attachments = message.attachments && message.attachments.length > 0 && (
+							<div className="message-attachments">
+								{message.attachments.map((att) => {
+									const isImage = att.mimeType.startsWith('image/');
+									const preview = isImage ? attachmentPreviewMap.get(att.storedPath) : undefined;
+									return (
+										<button
+											key={att.id}
+											type="button"
+											className="message-attachment"
+											onClick={async () => await window.electronAPI.openAttachment(att.storedPath)}
+											title={t('chat.openAttachment')}
+										>
+											{isImage && preview
+												? <img src={preview} alt={att.originalName} className="attachment-image"/>
+												: <span className="attachment-icon"><Icon name="file"/></span>}
+											<span className="attachment-meta">
+												<span className="attachment-name">{att.originalName}</span>
+												<span className="attachment-size">{Math.max(1, Math.round(att.sizeBytes / 1024))} KB</span>
+											</span>
+										</button>
+									);
+								})}
+							</div>
+						);
+
+						if (message.role === 'user') {
+							return (
+								<div key={index} className="message user">
+									{attachments}
+									{message.content && <div className="message-bubble">{message.content}</div>}
+									<div className="message-meta">{userName || t('chat.you')} · {formatTime(message.timestamp, locale)}</div>
+								</div>
+							);
+						}
+
+						return (
+							<div key={index} className="message assistant">
+								<div className="message-header">
+									<span className="brand-mark small">J</span>
+									<strong>Jørgen</strong>
+									<span className="timestamp">{formatTime(message.timestamp, locale)}</span>
+								</div>
+								<div className="message-content markdown">
+									{attachments}
 									<ReactMarkdown
 										remarkPlugins={[remarkGfm]}
 										rehypePlugins={[rehypeHighlight]}
@@ -904,126 +1004,203 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 									>
 										{shownText}
 									</ReactMarkdown>
-								) : (
-									<div className="user-text">{message.content}</div>
+								</div>
+								{!isStreaming && (
+									<div className="message-actions">
+										<button
+											className="message-action"
+											onClick={() => void copyMessage(index, shownText)}
+											title={t('chat.copyTooltip')}
+										>
+											<Icon name={copiedIndex === index ? 'check' : 'copy'} size={14}/>
+											{copiedIndex === index ? t('chat.copied') : t('chat.copy')}
+										</button>
+										{hasDetailed && (
+											<button
+												className={`message-action ${isExpanded ? 'active' : ''}`}
+												onClick={() => toggleExpanded(index)}
+												title={t('chat.detailsTooltip')}
+											>
+												<Icon name={isExpanded ? 'chevronDown' : 'chevronRight'} size={14}/>
+												{isExpanded ? t('chat.hideDetails') : t('chat.showDetails')}
+											</button>
+										)}
+									</div>
 								)}
 							</div>
-						</div>
-					);
-				})}
+						);
+					})}
 
-				{showLoadingBubble && (
-					<div className="message assistant">
-						<div className="message-header">
-							<div className="message-avatar">🤖</div>
-							<div className="message-info">
+					{showLoadingBubble && (
+						<div className="message assistant">
+							<div className="message-header">
+								<span className="brand-mark small">J</span>
 								<strong>Jørgen</strong>
 							</div>
-						</div>
-						<div className="message-content loading">
-							<div className="loading-dots">
-								<span></span>
-								<span></span>
-								<span></span>
-							</div>
-							<div className="progress-status">
-								{progressStatus || 'Thinking...'}
+							<div className="thinking">
+								<span className="thinking-pulse"/>
+								<span className="thinking-text">{translateProgress(progressStatus) || t('chat.thinking')}</span>
+								<ElapsedTime since={streamState?.startedAtMs}/>
 							</div>
 						</div>
+					)}
+
+					<div ref={messagesEndReference}/>
+				</div>
+			</div>
+
+			<div className="composer-wrap">
+				{clarificationRequest && (
+					<div className="clarification-card">
+						<div className="clarification-label">{t('chat.clarificationLabel')}</div>
+						<div className="clarification-question">{clarificationRequest.question}</div>
+						{clarificationRequest.options && clarificationRequest.options.length > 0 && (
+							<div className="clarification-options">
+								{clarificationRequest.options.map((opt) => (
+									<button
+										key={opt}
+										className="clarification-option"
+										onClick={() => {
+											submitClarification(chatId, opt);
+										}}
+									>
+										{opt}
+									</button>
+								))}
+							</div>
+						)}
 					</div>
 				)}
 
-				<div ref={messagesEndReference}/>
-			</div>
-
-			{clarificationRequest && (
-				<div className="clarification-area">
-					<div className="clarification-question">{clarificationRequest.question}</div>
-					{clarificationRequest.options && clarificationRequest.options.length > 0 && (
-						<div className="clarification-options">
-							{clarificationRequest.options.map((opt) => (
-								<button
-									key={opt}
-									className="clarification-option"
-									onClick={() => {
-										submitClarification(chatId, opt);
-									}}
-								>
-									{opt}
-								</button>
+				<div className={`composer ${isDragging ? 'dragging' : ''}`}>
+					<input
+						ref={fileInputReference}
+						type="file"
+						style={{display: 'none'}}
+						multiple
+						onChange={handleFileInputChange}
+					/>
+					{pendingAttachments.length > 0 && (
+						<div className="pending-attachments">
+							{pendingAttachments.map((att) => (
+								<span key={att.id} className="pending-attachment">
+									<Icon name="file" size={13}/>
+									<span className="pending-attachment-name">{att.originalName}</span>
+									<button
+										className="pending-attachment-remove"
+										onClick={() => removePendingAttachment(att.id)}
+										title={t('chat.removeAttachment')}
+									>
+										<Icon name="x" size={12}/>
+									</button>
+								</span>
 							))}
 						</div>
 					)}
-					<div className="clarification-hint">
-						Reply in the regular chat box below, or pick an option.
+					{attachmentError && (
+						<div className="attachment-error">
+							<Icon name="alert" size={14}/>
+							{attachmentError}
+						</div>
+					)}
+					<textarea
+						ref={textareaReference}
+						value={inputValue}
+						onChange={(event) => setInputValue(event.target.value)}
+						onPaste={async (event) => {
+							const items     = Array.from(event.clipboardData.items);
+							const imageItem = items.find((i) => i.kind === 'file' && i.type.startsWith('image/'));
+							if (imageItem) {
+								const file = imageItem.getAsFile();
+								if (file) {
+									event.preventDefault();
+									await addFileAsAttachment(file);
+								}
+							}
+						}}
+						onKeyDown={(event) => {
+							if (event.key === 'Enter' && !event.shiftKey) {
+								event.preventDefault();
+								handleSend();
+							}
+						}}
+						placeholder={clarificationRequest
+							? t('chat.placeholderAnswer')
+							: (hasSystem ? t('chat.placeholderSystem', {system: (filterDev ? databaseName : selectedChat?.systemName) ?? ''}) : t('chat.placeholder'))}
+						rows={1}
+						autoFocus
+					/>
+					<div className="composer-toolbar">
+						<button
+							type="button"
+							className="icon-btn"
+							onClick={() => fileInputReference.current?.click()}
+							disabled={isBusy}
+							title={t('chat.attachTooltip')}
+						>
+							<Icon name="paperclip"/>
+						</button>
+						<span className="composer-mode" title={t('chat.qualityTooltip')}>
+							{aiQualityProfile === 'maximum_accuracy' ? t('settings.ai.max') : t('settings.ai.balanced')}
+						</span>
+						{isStreamRunning ? (
+							<button type="button" onClick={handleStop} className="send-button stop" title={t('chat.stop')}>
+								<Icon name="stop" size={14}/>
+							</button>
+						) : (
+							<button
+								type="button"
+								onClick={handleSend}
+								className="send-button"
+								disabled={isBusy || (!inputValue.trim() && pendingAttachments.length === 0)}
+								title={t('chat.send')}
+							>
+								<Icon name="arrowUp" size={16}/>
+							</button>
+						)}
 					</div>
 				</div>
-			)}
-
-			<div className="input-area">
-				<input
-					ref={fileInputReference}
-					type="file"
-					style={{display: 'none'}}
-					multiple
-					onChange={handleFileInputChange}
-				/>
-				{pendingAttachments.length > 0 && (
-					<div className="pending-attachments">
-						{pendingAttachments.map((att) => (
-							<div key={att.id} className="pending-attachment">
-								<span className="pending-attachment-name">{att.originalName}</span>
-								<button className="pending-attachment-remove" onClick={() => removePendingAttachment(att.id)}>
-									Remove
-								</button>
-							</div>
-						))}
-					</div>
-				)}
-				{attachmentError && (
-					<div className="attachment-error">{attachmentError}</div>
-				)}
-				<textarea
-					ref={textareaReference}
-					value={inputValue}
-					onChange={(event) => setInputValue(event.target.value)}
-					onPaste={async (event) => {
-						const items     = Array.from(event.clipboardData.items);
-						const imageItem = items.find((i) => i.kind === 'file' && i.type.startsWith('image/'));
-						if (imageItem) {
-							const file = imageItem.getAsFile();
-							if (file) {
-								event.preventDefault();
-								await addFileAsAttachment(file);
-							}
-						}
-					}}
-					onKeyDown={(event) => {
-						if (event.key === 'Enter' && !event.shiftKey) {
-							event.preventDefault();
-							handleSend();
-						}
-					}}
-					placeholder="Ask away!"
-					disabled={isBusy}
-					autoFocus
-				/>
-				<button
-					onClick={() => fileInputReference.current?.click()}
-					disabled={isBusy}
-					className="attach-button"
-				>
-					Attach
-				</button>
-				{isStreamRunning && (
-					<button onClick={handleStop} className="stop-button">
-						Stop
-					</button>
-				)}
-				<button onClick={handleSend} disabled={isBusy || (!inputValue.trim() && pendingAttachments.length === 0)}>
-					Send
-				</button>
+				<div className="composer-footnote">
+					{t('chat.footnote')}
+				</div>
 			</div>
+
+			{isDragging && (
+				<div className="drop-overlay">
+					<Icon name="paperclip" size={22}/>
+					{t('chat.dropFiles')}
+				</div>
+			)}
 		</div>
+	);
+}
+
+const EXAMPLE_PROMPTS: Array<{ icon: IconName; text: TranslationKey }> = [
+	{icon: 'package', text: 'chat.example1'},
+	{icon: 'database', text: 'chat.example2'},
+	{icon: 'bug', text: 'chat.example3'},
+	{icon: 'list', text: 'chat.example4'},
+];
+
+function formatTime(date: Date, locale: string): string {
+	return date.toLocaleTimeString(locale, {hour: '2-digit', minute: '2-digit'});
+}
+
+function ElapsedTime({since}: { since?: number }): JSX.Element | null {
+	const [now, setNow] = useState(Date.now());
+
+	useEffect(() => {
+		const timer = setInterval(() => setNow(Date.now()), 1000);
+		return () => clearInterval(timer);
+	}, []);
+
+	if (!since) {
+		return null;
+	}
+	const seconds = Math.max(0, Math.floor((now - since) / 1000));
+	return (
+		<span className="thinking-elapsed">
+			{seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`}
+		</span>
 	);
 }

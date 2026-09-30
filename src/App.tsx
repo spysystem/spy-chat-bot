@@ -1,15 +1,44 @@
-import {useState, useEffect, JSX} from 'react';
+import {useState, useEffect, useMemo, JSX} from 'react';
 import {ChatView} from './components/ChatView';
 import {SettingsView} from './components/SettingsView';
 import {DebugView} from './components/DebugView';
 import {ConfirmModal} from './components/ConfirmModal';
 import {UpdateModal} from './components/UpdateModal';
+import {Icon} from './components/Icon';
 import {useTheme} from './ThemeContext';
+import {type TranslationKey, useI18n} from './i18n';
 import type {Chat} from './types';
 import {AiStreamProvider, useAiStreams} from './ai/AiStreamContext';
 import './App.css';
 
 type View = 'chat' | 'settings' | 'debug';
+
+/** Filters chats by title/system and buckets them by last activity (chats are already newest first). */
+function groupChatsByDate(chats: Chat[], search: string): Array<{ label: TranslationKey; chats: Chat[] }> {
+	const needle     = search.trim().toLowerCase();
+	const startOfDay = new Date();
+	startOfDay.setHours(0, 0, 0, 0);
+	const dayMs   = 24 * 60 * 60 * 1000;
+	const buckets = [
+		{label: 'sidebar.today' as const, from: startOfDay.getTime()},
+		{label: 'sidebar.yesterday' as const, from: startOfDay.getTime() - dayMs},
+		{label: 'sidebar.previous7' as const, from: startOfDay.getTime() - 7 * dayMs},
+		{label: 'sidebar.previous30' as const, from: startOfDay.getTime() - 30 * dayMs},
+		{label: 'sidebar.older' as const, from: -Infinity},
+	];
+	const groups  = buckets.map((bucket) => ({label: bucket.label, chats: [] as Chat[]}));
+
+	for (const chat of chats) {
+		if (needle && !`${chat.title} ${chat.systemName ?? ''}`.toLowerCase().includes(needle)) {
+			continue;
+		}
+		const updatedAt = new Date(chat.updatedAt).getTime();
+		const index     = buckets.findIndex((bucket) => updatedAt >= bucket.from);
+		groups[index].chats.push(chat);
+	}
+
+	return groups.filter((group) => group.chats.length > 0);
+}
 
 export function App(): JSX.Element {
 	const {theme, toggleTheme}              = useTheme();
@@ -39,11 +68,14 @@ export function App(): JSX.Element {
 function AppWithStreams(props: { theme: string; toggleTheme: () => void; initialView: View }): JSX.Element {
 	const {theme, toggleTheme, initialView}          = props;
 	const {isChatRunning}                            = useAiStreams();
+	const {t, chatTitle}                             = useI18n();
 	const [currentView, setCurrentView]              = useState<View>(initialView);
 	const [chats, setChats]                          = useState<Chat[]>([]);
 	const [currentChatId, setCurrentChatId]          = useState<string | null>(null);
 	const [chatToDelete, setChatToDelete]            = useState<string | null>(null);
 	const [showClearAllModal, setShowClearAllModal]  = useState(false);
+	const [chatSearch, setChatSearch]                = useState('');
+	const [userName, setUserName]                    = useState('');
 
 	// Update modal state
 	const [showUpdateModal, setShowUpdateModal]      = useState(false);
@@ -91,6 +123,16 @@ function AppWithStreams(props: { theme: string; toggleTheme: () => void; initial
 			unsubscribeUpdateError();
 		};
 	}, []);
+
+	// The name can be changed in Settings, so re-read it when returning to the chat.
+	useEffect(() => {
+		if (currentView !== 'chat') {
+			return;
+		}
+		void window.electronAPI.getUserName().then((name) => setUserName(name ?? ''));
+	}, [currentView]);
+
+	const chatGroups = useMemo(() => groupChatsByDate(chats, chatSearch), [chats, chatSearch]);
 
 	async function loadChats(): Promise<void> {
 		const allChats = await window.electronAPI.getChats();
@@ -228,67 +270,95 @@ function AppWithStreams(props: { theme: string; toggleTheme: () => void; initial
 	return (
 		<div className="app">
 			{currentView !== 'debug' && (
-				<div className="sidebar">
-					<h1>SPØRGE JØRGEN</h1>
-
-					<button className="new-chat-btn" onClick={createNewChat}>
-						+ New Chat
-					</button>
-					{chats.length > 0 && (
-						<button className="clear-chats-btn" onClick={openClearAllModal}>
-							Clear All Chats
-						</button>
-					)}
-
-					<div className="chat-list">
-						<div className="chat-list-header">Chats</div>
-						{chats.map((chat) => (
-							<div
-								key={chat.id}
-								className={`chat-item ${currentChatId === chat.id ? 'active' : ''}`}
-								onClick={() => selectChat(chat.id)}
-							>
-								{isChatRunning(chat.id) && (
-									<div className="chat-item-spinner" title="AI is working"/>
-								)}
-								<div className="chat-item-content">
-									<div className="chat-item-title">{chat.title}</div>
-									<div className="chat-item-date">
-										{new Date(chat.updatedAt).toLocaleDateString()}
-									</div>
-								</div>
-								<button
-									className="chat-item-delete"
-									onClick={(event) => {
-										event.stopPropagation();
-										openDeleteModal(chat.id);
-									}}
-									title="Delete chat"
-								>
-									🗑️
-								</button>
-							</div>
-						))}
+				<aside className="sidebar">
+					<div className="sidebar-brand">
+						<span className="brand-mark">J</span>
+						<span className="sidebar-brand-name">Spørge Jørgen</span>
 					</div>
 
-					<nav className="sidebar-nav">
+					<div className="sidebar-actions">
+						<button className="btn new-chat-btn" onClick={createNewChat}>
+							<Icon name="plus"/>
+							{t('sidebar.newChat')}
+						</button>
+						{chats.length > 0 && (
+							<label className="sidebar-search">
+								<Icon name="search" size={14}/>
+								<input
+									type="text"
+									value={chatSearch}
+									onChange={(event) => setChatSearch(event.target.value)}
+									placeholder={t('sidebar.searchChats')}
+								/>
+							</label>
+						)}
+					</div>
+
+					<div className="chat-list">
+						{chatGroups.map((group) => (
+							<div key={group.label} className="chat-group">
+								<div className="chat-group-header">{t(group.label)}</div>
+								{group.chats.map((chat) => (
+									<div
+										key={chat.id}
+										className={`chat-item ${currentView === 'chat' && currentChatId === chat.id ? 'active' : ''}`}
+										onClick={() => selectChat(chat.id)}
+									>
+										<div className="chat-item-content">
+											<div className="chat-item-title">{chatTitle(chat.title)}</div>
+											{chat.systemName && (
+												<div className="chat-item-meta">{chat.systemName}</div>
+											)}
+										</div>
+										{isChatRunning(chat.id) ? (
+											<div className="spinner" title={t('sidebar.working')}/>
+										) : (
+											<button
+												className="icon-btn chat-item-delete"
+												onClick={(event) => {
+													event.stopPropagation();
+													openDeleteModal(chat.id);
+												}}
+												title={t('sidebar.deleteChat')}
+											>
+												<Icon name="trash" size={14}/>
+											</button>
+										)}
+									</div>
+								))}
+							</div>
+						))}
+						{chats.length > 0 && chatGroups.length === 0 && (
+							<div className="chat-list-empty">{t('sidebar.noMatches', {query: chatSearch})}</div>
+						)}
+						{chats.length > 0 && !chatSearch && (
+							<button className="clear-chats-btn" onClick={openClearAllModal}>
+								{t('sidebar.clearAll')}
+							</button>
+						)}
+					</div>
+
+					<div className="sidebar-footer">
+						<div className="sidebar-user">
+							<span className="user-avatar">{(userName || '?').charAt(0).toUpperCase()}</span>
+							<span>{userName || t('sidebar.setName')}</span>
+						</div>
 						<button
-							className={currentView === 'chat' ? 'active' : ''}
-							onClick={() => setCurrentView('chat')}
+							className="icon-btn"
+							onClick={toggleTheme}
+							title={theme === 'dark' ? t('sidebar.lightMode') : t('sidebar.darkMode')}
 						>
-							💬 Chat
+							<Icon name={theme === 'dark' ? 'sun' : 'moon'}/>
 						</button>
 						<button
-							className={currentView === 'settings' ? 'active' : ''}
-							onClick={() => setCurrentView('settings')}
+							className={`icon-btn ${currentView === 'settings' ? 'active' : ''}`}
+							onClick={() => setCurrentView(currentView === 'settings' ? 'chat' : 'settings')}
+							title={t('sidebar.settings')}
 						>
-							⚙️ Settings
+							<Icon name="settings"/>
 						</button>
-						<button onClick={toggleTheme}>
-							{theme === 'dark' ? '☀️' : '🌙'} {theme === 'dark' ? 'Light Mode' : 'Dark Mode'}
-						</button>
-					</nav>
-				</div>
+					</div>
+				</aside>
 			)}
 
 			<div className="main-content">
@@ -296,20 +366,14 @@ function AppWithStreams(props: { theme: string; toggleTheme: () => void; initial
 					<ChatView key={currentChatId} chatId={currentChatId} onChatUpdate={loadChats}/>
 				)}
 				{currentView === 'chat' && !currentChatId && (
-					<div style={{
-						display       : 'flex',
-						flexDirection : 'column',
-						alignItems    : 'center',
-						justifyContent: 'center',
-						height        : '100%',
-						textAlign     : 'center',
-						padding       : '40px',
-						color         : 'var(--text-primary)',
-					}}>
-						<h2 style={{fontSize: '32px', marginBottom: '16px', fontWeight: '700'}}>No Chats Yet</h2>
-						<p style={{fontSize: '16px', color: 'var(--text-secondary)', marginBottom: '24px'}}>
-							Click "New Chat" to start a conversation
-						</p>
+					<div className="empty-app">
+						<span className="brand-mark large">J</span>
+						<h2>{t('app.emptyTitle')}</h2>
+						<p>{t('app.emptyText')}</p>
+						<button className="btn btn-primary" onClick={createNewChat}>
+							<Icon name="plus"/>
+							{t('app.startChat')}
+						</button>
 					</div>
 				)}
 				{currentView === 'settings' && (
@@ -322,20 +386,20 @@ function AppWithStreams(props: { theme: string; toggleTheme: () => void; initial
 
 			<ConfirmModal
 				isOpen={chatToDelete !== null}
-				title="Delete Chat"
-				message="Are you sure you want to delete this chat? This action cannot be undone."
+				title={t('app.deleteTitle')}
+				message={t('app.deleteMessage')}
 				onConfirm={confirmDelete}
 				onCancel={closeDeleteModal}
-				confirmText="Delete"
+				confirmText={t('app.deleteConfirm')}
 			/>
 
 			<ConfirmModal
 				isOpen={showClearAllModal}
-				title="Clear All Chats"
-				message="Are you sure you want to clear all chats? This action cannot be undone."
+				title={t('app.clearTitle')}
+				message={t('app.clearMessage')}
 				onConfirm={confirmClearAllChats}
 				onCancel={closeClearAllModal}
-				confirmText="Clear All"
+				confirmText={t('app.clearConfirm')}
 			/>
 
 			<UpdateModal
