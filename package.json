@@ -1,6 +1,6 @@
 {
 	"name": "spy-chat-bot",
-	"version": "1.4.0",
+	"version": "1.5.0",
 	"description": "Spy Chat Bot Desktop Application",
 	"main": "dist/electron/main.js",
 	"scripts": {
@@ -11,7 +11,7 @@
 		"build:electron": "npm run clean:electron && npm run copy:assets && tsc -p tsconfig.electron.json",
 		"build:vite": "vite build",
 		"clean:electron": "node -e \"require('fs').rmSync('dist/electron', {recursive: true, force: true})\"",
-		"copy:assets": "node -e \"const fs = require('fs'); const path = require('path'); const src = 'assets'; const dest = 'dist/assets'; fs.mkdirSync(dest, {recursive: true}); fs.cpSync(src, dest, {recursive: true}); console.log('Assets copied to dist/');\"",
+		"copy:assets": "node -e \"const fs = require('fs'); const path = require('path'); const src = 'assets'; const dest = 'dist/assets'; fs.rmSync(dest, {recursive: true, force: true}); fs.mkdirSync(dest, {recursive: true}); fs.cpSync(src, dest, {recursive: true}); console.log('Assets copied to dist/');\"",
 		"package": "npm run build && electron-builder",
 		"package:win": "npm run build && npm install --no-save --force @vscode/ripgrep-win32-x64@1.18.0 && electron-builder --win",
 		"package:mac": "npm run build && electron-builder --mac",

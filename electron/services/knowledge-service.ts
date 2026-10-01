@@ -42,8 +42,7 @@ function tokenize(text: string): string[] {
 }
 
 /**
- * Keyword retrieval (BM25) over the bundled SPY knowledge chunks. The store also carries
- * embeddings, but there is no local model to embed queries with, so ranking is lexical.
+ * Keyword retrieval (BM25) over the bundled example SQL queries (one JSONL line per example).
  */
 export class KnowledgeService {
 	private readonly storePath: string;
@@ -54,7 +53,7 @@ export class KnowledgeService {
 	private averageLength                               = 0;
 	private loading: Promise<void> | null               = null;
 
-	constructor(storePath: string = path.join(__dirname, '../../assets/vector/vector.store')) {
+	constructor(storePath: string = path.join(__dirname, '../../assets/knowledge/sql-examples.jsonl')) {
 		this.storePath = storePath;
 	}
 

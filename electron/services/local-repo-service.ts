@@ -255,7 +255,6 @@ export class LocalRepoService {
 			if (!cloned) {
 				await this.fetchUnlocked(onProgress);
 			}
-			await this.runGit(['remote', 'set-head', 'origin', '--auto'], {cwd: this.repoPath, allowFail: true});
 			await this.refreshAllWorktreesUnlocked(onProgress);
 			await this.pruneWorktreesUnlocked();
 		});
@@ -302,6 +301,18 @@ export class LocalRepoService {
 			this.verifiedAt.set(effectiveBranch, verified);
 			this.verifiedAt.set(requested, verified);
 			return {path: worktreePath, branch: effectiveBranch, commit};
+		});
+	}
+
+	/** Whether `branch` exists on the remote, fetching once more when it is not known locally. */
+	async hasBranch(url: string, branch: string): Promise<boolean> {
+		return await this.withLock(async () => {
+			await this.ensureRepoUnlocked(url, {fetch: 'if-stale'});
+			if (await this.resolveRemoteBranch(branch)) {
+				return true;
+			}
+			await this.fetchUnlocked();
+			return !!(await this.resolveRemoteBranch(branch));
 		});
 	}
 
@@ -540,6 +551,9 @@ export class LocalRepoService {
 		const state = await this.loadState('');
 		onProgress?.({stage: 'Fetching branches'});
 		await this.runGit(['fetch', '--prune', '--progress', 'origin'], {cwd: this.repoPath, onProgress, network: true, url: state.url});
+		// fetch never moves origin/HEAD: when GitHub's default branch changes and the old one is
+		// deleted, origin/HEAD is left pointing at the deleted branch until set-head runs.
+		await this.runGit(['remote', 'set-head', 'origin', '--auto'], {cwd: this.repoPath, allowFail: true, network: true, url: state.url});
 		state.lastFetchIso = new Date().toISOString();
 		this.verifiedAt.clear();
 		await this.saveState();

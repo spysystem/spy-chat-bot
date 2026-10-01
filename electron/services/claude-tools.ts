@@ -745,7 +745,7 @@ export async function createAgentTools(ctx: ToolContext): Promise<AgentToolset> 
 
 	tools.push(tool(
 		'search_knowledge',
-		'Search the internal SPY knowledge base: feature areas and where their code lives, business terminology and synonyms, and example joins between tables. Use English keywords.',
+		'Search example SQL queries for common SPY data questions (sales orders and their styles/colors/sizes, cancelled lines, customers, brands, salespeople, consignment sales reports, newsletters and the mail log). Use English keywords. The examples show which tables to join; check columns with describe_table before relying on them.',
 		{query: {type: 'string'}},
 		['query'],
 		async (input) => {

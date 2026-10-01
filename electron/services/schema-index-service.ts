@@ -230,6 +230,13 @@ export class SchemaIndexService {
 		};
 	}
 
+	/** When the index for exactly this branch was generated (no fallback to other branches), or null. */
+	async getGeneratedAt(configId: string, branch: string): Promise<Date | null> {
+		const cached = this.memoryCache.get(this.buildKey(configId, branch));
+		const index  = cached?.index ?? await this.readIndexFile(this.buildFilePath(configId, branch));
+		return index ? new Date(index.generatedAtIso) : null;
+	}
+
 	async loadIndex(configId: string, options?: SchemaIndexLookupOptions): Promise<SchemaIndexFileV1 | null> {
 		const resolved = await this.resolveIndex(configId, options);
 		return resolved ? resolved.index : null;
@@ -240,11 +247,12 @@ export class SchemaIndexService {
 		sampleDatabaseName: string,
 		databaseService: DatabaseService,
 		onProgress?: (progress: SchemaIndexProgress) => void,
-		options?: SchemaIndexLookupOptions,
+		options?: { branch?: string; dbHost?: string },
 	): Promise<SchemaIndexStatus> {
 		assertSafeIdentifier(sampleDatabaseName, 'Database name');
 
 		const branch   = normalizeBranch(options?.branch);
+		const dbHost   = options?.dbHost?.trim() || undefined;
 		const filePath = this.buildFilePath(configId, branch);
 		await fs.mkdir(path.dirname(filePath), {recursive: true});
 
@@ -256,7 +264,7 @@ export class SchemaIndexService {
 		let index: SchemaIndexFileV1 | null = null;
 
 		try {
-			index = await this.generateFromInformationSchema(configId, sampleDatabaseName, databaseService, branch, onProgress);
+			index = await this.generateFromInformationSchema(configId, sampleDatabaseName, databaseService, branch, dbHost, onProgress);
 		} catch (error) {
 			// Non-fatal: we'll fall back to DESCRIBE-based indexing below.
 		}
@@ -264,7 +272,7 @@ export class SchemaIndexService {
 		if (!index) {
 			// Fallback will report per-table progress from generateFromDescribeFallback().
 			onProgress?.({stage: 'Falling back to DESCRIBE-based indexing...', done: 0, total: 1});
-			index = await this.generateFromDescribeFallback(configId, sampleDatabaseName, databaseService, branch, onProgress);
+			index = await this.generateFromDescribeFallback(configId, sampleDatabaseName, databaseService, branch, dbHost, onProgress);
 			// Note: We intentionally do not surface lastInfoSchemaError here via return type to keep UI simple.
 			// The caller can log it to the debug window if desired.
 		}
@@ -299,6 +307,7 @@ export class SchemaIndexService {
 		databaseName: string,
 		databaseService: DatabaseService,
 		branch: string | undefined,
+		dbHost: string | undefined,
 		onProgress?: (progress: SchemaIndexProgress) => void,
 	): Promise<SchemaIndexFileV1> {
 		// Keep these aligned with generateIndex() infoSchemaStepsTotal (5).
@@ -314,6 +323,7 @@ export class SchemaIndexService {
                        && t.table_type = 'BASE TABLE'
              ORDER BY t.table_name`,
 			databaseName,
+			dbHost,
 		);
 
 		const tableRows = tablesResult.rows
@@ -338,6 +348,7 @@ export class SchemaIndexService {
              WHERE c.table_schema = '${databaseName}'
              ORDER BY c.table_name, c.ordinal_position`,
 			databaseName,
+			dbHost,
 		);
 
 		onProgress?.({stage: 'Reading keys from information_schema...', done: 3, total: stepsTotal});
@@ -358,6 +369,7 @@ export class SchemaIndexService {
                        && tc.constraint_type IN ('PRIMARY KEY', 'FOREIGN KEY')
              ORDER BY kcu.table_name, kcu.ordinal_position`,
 			databaseName,
+			dbHost,
 		);
 
 		// Build table map.
@@ -434,6 +446,7 @@ export class SchemaIndexService {
 		return {
 			version           : 1,
 			generatedAtIso    : new Date().toISOString(),
+			dbHost,
 			configId,
 			branch,
 			sampleDatabaseName: databaseName,
@@ -447,11 +460,12 @@ export class SchemaIndexService {
 		databaseName: string,
 		databaseService: DatabaseService,
 		branch: string | undefined,
+		dbHost: string | undefined,
 		onProgress?: (progress: SchemaIndexProgress) => void,
 	): Promise<SchemaIndexFileV1> {
 		onProgress?.({stage: 'Listing tables...', done: 0, total: 1});
 
-		const tableNames = await databaseService.listTables(configId, databaseName);
+		const tableNames = await databaseService.listTables(configId, databaseName, dbHost);
 		const total      = tableNames.length;
 
 		const tables: SchemaIndexTable[] = [];
@@ -460,7 +474,7 @@ export class SchemaIndexService {
 		for (const tableName of tableNames) {
 			done++;
 			onProgress?.({stage: `Describing table: ${tableName}`, done, total});
-			const schema = await databaseService.getTableSchema(configId, tableName, databaseName);
+			const schema = await databaseService.getTableSchema(configId, tableName, databaseName, dbHost);
 
 			const columns: SchemaIndexColumn[] = [];
 			for (let index = 0; index < schema.rows.length; index++) {
@@ -499,6 +513,7 @@ export class SchemaIndexService {
 		return {
 			version           : 1,
 			generatedAtIso    : new Date().toISOString(),
+			dbHost,
 			configId,
 			branch,
 			sampleDatabaseName: databaseName,

@@ -56,11 +56,11 @@ npm run package:linux          # Linux (AppImage)
                  │
 ┌────────────────▼────────────────────────────────────────┐
 │ Services Layer (electron/services/)                     │
-│ - ClaudeService: Claude agent loop (Opus 5)             │
+│ - ClaudeService: Claude agent loop (Opus 5.5)           │
 │ - claude-tools: tool definitions for the agent          │
 │ - DatabaseService: Multi-layer read-only enforcement    │
 │ - GitHubService + LocalRepoService: code access / sync  │
-│ - KnowledgeService: BM25 search over SPY knowledge      │
+│ - KnowledgeService: BM25 search over example SQL        │
 │ - ChatService: Persistent conversation storage          │
 │ - SettingsService: User preferences                     │
 └─────────────────────────────────────────────────────────┘
@@ -70,22 +70,22 @@ npm run package:linux          # Linux (AppImage)
 
 **ClaudeService** (`electron/services/claude-service.ts`)
 
-- Uses the official `@anthropic-ai/sdk` directly (no TanStack/OpenAI layer). Model `claude-opus-5` (`MAIN_MODEL`); title and working-summary calls use `claude-haiku-4-5`
+- Uses the official `@anthropic-ai/sdk` directly (no TanStack/OpenAI layer). Model `claude-opus-5-5` (`MAIN_MODEL`); title and working-summary calls use `claude-haiku-4-5`
 - One streaming agent loop (`client.beta.messages.stream`): adaptive thinking (`display: "summarized"`), `output_config.effort` from the quality setting (Balanced = `medium`, Maximum Accuracy = `high`), prompt caching (static system block + automatic top-level cache), server-side refusal fallback (`fallbacks: "default"`, beta `server-side-fallback-2026-07-01`)
 - Up to 40 model turns; tool calls in a turn run in parallel; the last turn uses `tool_choice: none` so the model must answer
 - The model writes the user-facing answer itself - there is no separate "simplification" pass. `detailedAnswer` = answer + an "Investigation details" appendix (SQL run, files read, searches) built from the tool evidence log
-- System prompt = `STATIC_SYSTEM_PROMPT` (cached) + a per-request block (connected database, branch, available sources, working summary, knowledge-base matches)
+- System prompt = `STATIC_SYSTEM_PROMPT` (cached) + a per-request block (connected database, branch, available sources, working summary). The full prompt is logged to the Debug window as "Claude system prompt" on every question
 - After each answer a working summary is written in the background (Haiku) and stored on the chat; the next turn waits for it
 - Emits AG-UI-style events to the renderer (`TEXT_MESSAGE_START/CONTENT/END` with a per-turn `messageId`, `TOOL_CALL_START/END`, `STEP_STARTED/FINISHED` for thinking, `RUN_STARTED/FINISHED`). The renderer replaces the streamed text when a new turn starts, so pre-tool progress notes are not kept
 
 **Agent tools** (`electron/services/claude-tools.ts`) - only registered when the source is configured:
 
-- Database: `search_schema`, `describe_table` (schema index, falls back to live `DESCRIBE`), `query_database` (≤200 rows as TSV; errors come back with schema suggestions), `export_to_csv` (full result to Downloads, UTF-8 BOM)
+- Database: `search_schema`, `describe_table` (schema index per connection + release branch, falls back to live `DESCRIBE`; `refreshSchemaIndex()` in `main.ts` builds it in the background from the chat's own database/host when missing or older than a day), `query_database` (≤200 rows as TSV; errors come back with schema suggestions), `export_to_csv` (full result to Downloads, UTF-8 BOM)
 - Code (local clone): `search_code` (ripgrep; literal by default, optional regex/path/glob/context), `read_file` (line ranges, 1500 lines per call), `list_directory`, `find_files`. Without a local clone, GitHub API fallbacks for `search_code`/`read_file`/`list_directory`
 - Code history (local clone): `file_history` (commits touching a path, optional pickaxe `search`, each annotated with the first `YYYY_MM` release branch containing it), `show_commit`, `compare_branches` (e.g. `2026_07..2026_09`)
 - Sentry (when a token is set in Settings): `search_errors` (issues + counts for the chat's system via the `system_key` tag, Discover events API) and `get_error_details` (latest event's stack trace, request, breadcrumbs; server paths trimmed to repo paths)
 - `spy_search_code` / `spy_search_context` when the spy-code-ai MCP server is configured (Cursor MCP config)
-- `search_knowledge` (always) and `ask_clarifying_question` (ends the run and shows the question with clickable options)
+- `search_knowledge` (always; example SQL queries) and `ask_clarifying_question` (ends the run and shows the question with clickable options)
 - `web_search` / `web_fetch` (always): Anthropic's server-side tools (`web_search_20260209`, `web_fetch_20260209`), declared in `WEB_TOOLS` in `claude-service.ts`. They run on Anthropic's servers inside the model turn (max 5 searches and 5 fetches per request), so the loop never executes them. The system prompt limits them to questions about things outside SPY (carriers, platforms, EDI, VAT, external error messages) and forbids customer data in search queries. Searches and the pages used go into "Investigation details". Web search must be enabled for the organisation in the Claude Console
 
 **DatabaseService** (`electron/services/database-service.ts`)
@@ -107,8 +107,9 @@ npm run package:linux          # Linux (AppImage)
 
 **KnowledgeService** (`electron/services/knowledge-service.ts`)
 
-- Loads `assets/vector/vector.store` (JSONL chunks; the stored embeddings are unused because there is no local query-embedding model)
-- BM25 keyword ranking; the top 4 matches for the question are put in the system prompt, and the model can call `search_knowledge`
+- Loads `assets/knowledge/sql-examples.jsonl`: ~80 example SQL queries for common data questions (orders, styles/colors/sizes, customers, consignment, newsletters, mail log), each checked with `EXPLAIN` against a live database
+- BM25 keyword ranking; only used through the `search_knowledge` tool (nothing is put in the system prompt automatically)
+- Table synonyms and "where data lives" are in `STATIC_SYSTEM_PROMPT` instead
 
 **GitHubService** (`electron/services/github-service.ts`) and **LocalRepoService** (`electron/services/local-repo-service.ts`)
 
@@ -118,6 +119,8 @@ npm run package:linux          # Linux (AppImage)
 - All git mutations are serialised by one lock (the model calls tools in parallel). Branches are fetched when older than 5 minutes; a worktree is moved to its branch's latest commit whenever it is used; "Sync Repository" and the 20-minute background job fetch and refresh every worktree, remove worktrees for deleted branches, and prune ones unused for 21 days
 - Clones go to a temp dir and are renamed on success; a broken clone or a changed repository URL triggers a fresh clone
 - A chat without a branch uses the repository's default branch (`origin/HEAD`), not the unused `branch` field in the GitHub config
+- Every fetch also runs `git remote set-head origin --auto`, because fetch leaves `origin/HEAD` pointing at a deleted branch when GitHub's default branch changes
+- Before each question `resolveChatBranch()` in `main.ts` moves a chat to its system's current release (system directory lookup, `resolveSystemBranch()` in `electron/services/shared/release-branch.ts`, shared with the renderer) and uses the default branch if the chat's branch no longer exists
 
 ### Deep Link Protocol
 
@@ -210,7 +213,7 @@ Separate Electron window (`#debug` route) that displays:
 - Database queries with full SQL
 - Tool usage (GitHub searches, file reads)
 - Claude API calls and thinking blocks
-- Vector store search results
+- The full system prompt for each question
 - Error stack traces
 
 Access via Settings → Open Debug Window
@@ -270,8 +273,8 @@ src/
 assets/
   prompts/
     spy-code-ai-chatbot.mdc  # Extra system prompt when the spy-code-ai MCP is configured
-  vector/
-    vector.store       # SPY knowledge chunks (JSONL), searched with BM25
+  knowledge/
+    sql-examples.jsonl # Example SQL queries (JSONL), searched with BM25 by search_knowledge
 
 dist/
   electron/            # Compiled main process (TypeScript → CommonJS)
@@ -344,7 +347,7 @@ DatabaseService security cannot be bypassed:
 
 ## Asset Copying
 
-The `copy:assets` script copies `assets/` to `dist/assets/` during build. The knowledge store must be in `dist/assets/vector/vector.store` at runtime.
+The `copy:assets` script replaces `dist/assets/` with a copy of `assets/` during build. The examples must be in `dist/assets/knowledge/sql-examples.jsonl` at runtime.
 
 ## Testing Database Connections
 
@@ -370,9 +373,9 @@ Use the Settings view to:
 - Edit `STATIC_SYSTEM_PROMPT` (bottom of `claude-service.ts`) for behaviour that applies to every chat; per-request context is built in `buildSystemPrompt()`
 - Model, effort mapping, turn limit and token limits are constants at the top of `claude-service.ts`
 
-**Add knowledge:**
+**Add an example query:**
 
-1. Add JSONL lines (`{"id": ..., "content": ...}`) to `assets/vector/vector.store` (the source JSON is not in the repo)
+1. Add a JSONL line (`{"id": "sql-NNN", "content": "Example: <question>\n<SQL>"}`) to `assets/knowledge/sql-examples.jsonl`, after checking the SQL with `EXPLAIN` on a live system
 2. Rebuild the app to include it in `dist/assets/`
 
 **Extend tool capabilities:**

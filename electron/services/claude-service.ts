@@ -13,7 +13,7 @@ import type {AiQualityProfile} from './settings-service';
 import {loadPromptAsset} from './shared/prompt-asset-loader';
 import type {SpyCodeAiMcpService} from './spy-code-ai-mcp-service';
 
-const MAIN_MODEL         = 'claude-opus-5';
+const MAIN_MODEL         = 'claude-opus-5-5';
 const LIGHT_MODEL        = 'claude-haiku-4-5';
 const MAX_AGENT_TURNS    = 40;
 const MAX_OUTPUT_TOKENS  = 64_000;
@@ -157,7 +157,6 @@ export class ClaudeService {
 		const toolByName = new Map(toolset.tools.map((t) => [t.definition.name, t]));
 
 		const workingSummary = chatRecord?.workingSummary?.text?.trim() || '';
-		const knowledgeDocs  = await this.knowledgeService.search(userMessage, 4).catch(() => []);
 		const system         = await this.buildSystemPrompt({
 			toolset,
 			databaseName: input.databaseName,
@@ -168,14 +167,15 @@ export class ClaudeService {
 			systemKey   : chatRecord?.systemKey,
 			systemUrl   : chatRecord?.systemUrl,
 			workingSummary,
-			knowledge   : knowledgeDocs.map((d) => d.text),
 		});
 		const messages       = [
 			...buildHistory(input.conversationHistory, userMessage),
 			{role: 'user' as const, content: await this.buildUserContent(userMessage, input.attachments, attachmentService, log)},
 		];
+		log('info', 'Claude system prompt', `System prompt (${system.reduce((sum, block) => sum + block.text.length, 0)} chars)`,
+			system.map((block) => block.cache_control ? `===== Static (cached) =====\n${block.text}` : `===== Per request =====\n${block.text}`).join('\n\n'));
 		log('info', 'Claude API', `Model ${MAIN_MODEL}, effort ${effort}, ${toolset.tools.length} tools, ${messages.length} messages`,
-			`tools: ${toolset.tools.map((t) => t.definition.name).join(', ')}\nknowledge docs: ${knowledgeDocs.length}\nworking summary: ${workingSummary.length} chars`);
+			`tools: ${toolset.tools.map((t) => t.definition.name).join(', ')}\nworking summary: ${workingSummary.length} chars`);
 
 		onEvent?.({type: 'RUN_STARTED', model: MAIN_MODEL});
 		onProgress?.('Jørgen is thinking...');
@@ -327,7 +327,6 @@ export class ClaudeService {
 		systemKey?: string;
 		systemUrl?: string;
 		workingSummary: string;
-		knowledge: string[];
 	}): Promise<Anthropic.Beta.BetaTextBlockParam[]> {
 		const {capabilities}     = context.toolset;
 		const sections: string[] = [`Today is ${new Date().toISOString().slice(0, 10)}.`];
@@ -366,9 +365,6 @@ export class ClaudeService {
 		}
 		if (context.workingSummary) {
 			sections.push(`<working_summary>\nNotes from earlier in this chat (table names, queries, files and conclusions). Use them as leads, and re-check anything the answer depends on. If the notes or earlier answers say a tool or source was unavailable, that has usually been fixed since - use it again instead of repeating the earlier limitation.\n\n${context.workingSummary}\n</working_summary>`);
-		}
-		if (context.knowledge.length > 0) {
-			sections.push(`<knowledge_base_matches>\nExcerpts from the internal SPY knowledge base that matched the question (may be partial or irrelevant):\n\n${context.knowledge.map((k) => k.slice(0, 3000)).join('\n\n---\n\n')}\n</knowledge_base_matches>`);
 		}
 
 		return [
@@ -593,7 +589,7 @@ function formatEvidence(evidence: EvidenceItem[], limit: number = 40): string {
 		file       : 'Files read',
 		history    : 'Code history',
 		csv        : 'CSV exports',
-		knowledge  : 'Knowledge base searches',
+		knowledge  : 'Example query searches',
 		mcp        : 'Code index searches',
 		sentry     : 'Error lookups (Sentry)',
 		web_search : 'Web searches',
@@ -626,7 +622,7 @@ function formatEvidence(evidence: EvidenceItem[], limit: number = 40): string {
 
 const STATIC_SYSTEM_PROMPT = `You are Jørgen ("Spørge Jørgen"), the assistant for SPY's customer support staff. SPY is a warehouse management and e-commerce system used by fashion and lifestyle brands. The people asking you are support staff, not developers: they need to understand what happened in a customer's SPY system, why, and what the customer should do.
 
-You investigate with tools: read-only SQL against the customer's database, search and read the SPY source code, SPY's internal knowledge base, and the web. For anything about SPY and the customer's data, the database and the code are the source of truth - look things up rather than relying on general knowledge or assumptions.
+You investigate with tools: SQL against the customer's database, search and read the SPY source code, example queries, and the web. For anything about SPY and the customer's data, the database and the code are the source of truth - look things up rather than relying on general knowledge or assumptions.
 
 # Language
 Reply in the language the user writes in (usually Danish). SPY's user interface is in English, so keep SPY terms and screen labels in English exactly as they appear in the system (for example consignment, style, assortment, brand, season, shipment, packing, claim, return, POS, B2B, B2C, EDI) - in Danish text write "consignment-kunde", not "konsignationskunde".
@@ -650,6 +646,12 @@ Reply in the language the user writes in (usually Danish). SPY's user interface 
 - Columns are rarely NULL: 0 means "not set" for integers and '' for text. Most tables have added_user_id, added_date, changed_user_id, changed_date.
 - "Active" usually means disabled = 0 (there is typically no is_active column). "Active customers" as shown on Customers > Active means disabled = 0 AND type != 'b2c' (the page also filters by brand access).
 - Never query views whose names start with bi_ (BI views); use the underlying tables.
+- Where common data lives (check the columns with describe_table; search_knowledge has example queries):
+  - Sales orders: s_order_main (order_no is the number users see; status temp/proposal/order/consignment). Lines: s_order_styles (so_qty, so_delivered_qty, cancel) -> s_order_style_seasons -> s_order_style_colors -> s_order_style_sizesets (quantity per size).
+  - Styles (users may say products, items, articles, clothes): styles. Colour is not on styles: join styles_colors -> color_master. Sizes: sizesets_sizes. Variants/SKUs: styles_variants.
+  - Customers (clients, retailers, shops, accounts): customers, name in company. customers_brands links a customer to its brands and the salesperson per brand (cbSalespersonId -> users.uId).
+  - Brands: brands (dpId, dpName). Users, including salespeople (sales rep, agent): users (uId). Suppliers (vendors, factories, manufacturers): suppliers; purchase orders: p_order_main.
+  - Deliveries/shipments: packing_master, packing_details. Returns: claims, claims_style. Invoices: s_order_invoice_no, invoices. Consignment sales reports: s_order_consignment_pending. Emails sent: maillog, maillog_receivers. Newsletters: news_master, news_receivers.
 - Consignment affects orders, customers, stock and integrations. POS integrations such as Shopify POS require the customer to be a consignment customer (customers.is_consignment_customer). Check whether consignment matters when answering about integrations, order flow or customers.
 - Code layout: pages in modules/<module>/index.php or view.php; actions/handlers (dialogs and AJAX operations, not separate pages) in modules/<module>/action.php, action_*.php or _action.php; MVC controllers in applications/Spy/Controller/...; TypeScript controllers in public/javascript/Controller/....
 - UI actions: an element with data-spyaction="OpenCustomer|click" calls OpenCustomerAction() in the page's TypeScript controller, which calls a PHP controller (new Get(...)/new Post(...)) whose HTML is shown with showDialog(). To explain a dialog, follow that chain.
@@ -686,7 +688,7 @@ The user only sees your final message - not your tool calls, their results, or t
 - When the user wants a list, export, extract or overview they will use outside the chat ("liste", "udtræk", "oversigt", "export"), save it with export_to_csv and tell them the file name - it is in their Downloads folder.
 
 # Boundaries
-- You have read-only access. Never write or suggest INSERT/UPDATE/DELETE/ALTER or other write SQL, and never offer to change data or code. If something needs fixing, explain the cause, how to verify it, and that a developer or administrator must make the change.
+- You can look things up but not change data or code. If something needs fixing, explain the cause, how to verify it, and that a developer or administrator must make the change.
 - Deliver what the user asked for, at the scope they intended. Make routine judgment calls yourself. Use ask_clarifying_question only when you cannot find the missing information with your tools and different interpretations would lead to materially different answers.
 
 <tone_preference>

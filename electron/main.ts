@@ -15,6 +15,7 @@ import {SentryService} from './services/sentry-service';
 import type {AiQualityProfile} from './services/settings-service';
 import {SettingsService} from './services/settings-service';
 import {SpyCodeAiMcpService} from './services/spy-code-ai-mcp-service';
+import {resolveSystemBranch} from './services/shared/release-branch';
 import {SystemDirectoryService} from './services/system-directory-service';
 import type {DatabaseConfig} from './types';
 
@@ -558,6 +559,57 @@ ipcMain.handle('open-attachment', async (_event, storedPath: string) => {
 	return await attachmentService.openAttachment(storedPath);
 });
 
+/**
+ * A chat stores the release branch its system ran when the system was picked. Systems get
+ * upgraded and old release branches deleted, so follow the system's current release, and
+ * use the default branch when the chat's branch no longer exists.
+ */
+async function resolveChatBranch(chatId: string, requested: string | undefined, log: ReturnType<typeof createDebugLogger>): Promise<string | undefined> {
+	let branch = requested?.trim() || undefined;
+	const chat = await chatService.getChat(chatId);
+	if (chat?.systemKey && !chat.isDevMode) {
+		const systems = await systemDirectoryService.getSystems(['active', 'restore']).catch(() => []);
+		const system  = systems.find((s) => s.systemKey === chat.systemKey);
+		const current = system ? resolveSystemBranch(system) : '';
+		if (current && current !== branch) {
+			log('info', 'Git Local Sync', `Chat branch ${branch ?? '(none)'} -> ${current}: ${chat.systemKey} now runs release ${system?.release ?? current}`);
+			await chatService.setBranch(chatId, current, system?.release);
+			branch = current;
+		}
+	}
+
+	const localRepoUrl = githubService.getLocalRepoUrl();
+	if (branch && localRepoUrl && !(await githubService.localRepo.hasBranch(localRepoUrl, branch).catch(() => true))) {
+		log('info', 'Git Local Sync', `Branch ${branch} no longer exists on GitHub - using the default branch`);
+		return undefined;
+	}
+	return branch;
+}
+
+const SCHEMA_INDEX_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const schemaIndexRuns         = new Map<string, Promise<unknown>>();
+
+/**
+ * Builds the schema index for the chat's release branch from the chat's own database (which
+ * runs that release), and rebuilds it daily so columns added by release patches show up.
+ * Runs in the background: until it exists, the schema tools read the live database.
+ */
+async function refreshSchemaIndex(configId: string, databaseName: string, dbHost: string | undefined, branch: string, log: ReturnType<typeof createDebugLogger>): Promise<void> {
+	const key = `${configId}::${branch}`;
+	if (schemaIndexRuns.has(key)) {
+		return;
+	}
+	const generatedAt = await schemaIndexService.getGeneratedAt(configId, branch);
+	if (generatedAt && Date.now() - generatedAt.getTime() < SCHEMA_INDEX_MAX_AGE_MS) {
+		return;
+	}
+	const run = schemaIndexService.generateIndex(configId, databaseName, databaseService, undefined, {branch, dbHost})
+		.then((status) => log('info', 'Schema index', `Schema index for ${branch} built from ${databaseName} (${status.tableCount} tables)`))
+		.catch((error) => log('error', 'Schema index', `Could not build the schema index for ${branch}`, error instanceof Error ? error.message : String(error)))
+		.finally(() => schemaIndexRuns.delete(key));
+	schemaIndexRuns.set(key, run);
+}
+
 ipcMain.handle('start-ai-stream', async (event, chatId: string, message: string, databases: string[], history?: Array<{
 	role: string;
 	content: string;
@@ -722,12 +774,15 @@ ipcMain.handle('start-ai-stream', async (event, chatId: string, message: string,
 
 	void (async () => {
 		try {
+			const githubBranch = await resolveChatBranch(chatId, chatContext?.githubBranch, log);
+			if (githubBranch && databases.length > 0 && chatContext?.databaseName) {
+				void refreshSchemaIndex(databases[0], chatContext.databaseName, chatContext.dbHost, githubBranch, log);
+			}
 			// Warm up the branch worktree while the model reads the question, so the first
 			// code search does not wait for a checkout.
 			const localRepoUrl = githubService.getLocalRepoUrl();
 			if (localRepoUrl) {
-				void githubService.resolveBranch(chatContext?.githubBranch)
-					.then((branch) => githubService.localRepo.ensureWorktree(localRepoUrl, branch))
+				void githubService.localRepo.ensureWorktree(localRepoUrl, githubBranch)
 					.then((worktree) => sendDebugLog('info', 'Worktree', `Worktree ready: ${worktree.branch}@${worktree.commit.slice(0, 8)}`, worktree.path))
 					.catch((error) => sendDebugLog('error', 'Worktree', 'Could not prepare worktree', error instanceof Error ? error.message : String(error)));
 			}
@@ -739,7 +794,7 @@ ipcMain.handle('start-ai-stream', async (event, chatId: string, message: string,
 				conversationHistory : history,
 				databaseName        : chatContext?.databaseName,
 				dbHostOverride      : chatContext?.dbHost,
-				githubBranchOverride: chatContext?.githubBranch,
+				githubBranchOverride: githubBranch,
 				attachments,
 				qualityProfile      : aiQualityProfile,
 				onProgress,

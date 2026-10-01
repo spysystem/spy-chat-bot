@@ -207,6 +207,17 @@ export class ChatService {
 		await this.saveChats(chats);
 	}
 
+	async setBranch(chatId: string, branch: string, release?: string): Promise<void> {
+		const chats = await this.getChats();
+		const chat  = chats.find((c) => c.id === chatId);
+		if (!chat) {
+			throw new Error(`Chat not found: ${chatId}`);
+		}
+		chat.branch  = branch;
+		chat.release = release ?? chat.release;
+		await this.saveChats(chats);
+	}
+
 	async setWorkingSummary(chatId: string, text: string): Promise<void> {
 		const chats     = await this.getChats();
 		const chatIndex = chats.findIndex((c) => c.id === chatId);
