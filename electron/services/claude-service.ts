@@ -24,6 +24,7 @@ const SPY_CODE_AI_PROMPT = 'spy-code-ai-chatbot.mdc';
 const MAX_WEB_SEARCHES   = 5;
 const MAX_WEB_FETCHES    = 5;
 const MAX_FOLLOW_UPS     = 3;
+const MAX_REPLY_EXAMPLES = 3;
 
 // Anthropic-hosted tools: they run on Anthropic's servers and their results come back
 // inside the same response, so the agent loop never executes them. Limits are per request.
@@ -94,6 +95,12 @@ export interface DraftCustomerReplyInput {
 	language: ReplyLanguage;
 	instructions?: string;
 	senderName?: string;
+	recipient?: {
+		name: string;
+		toneNote?: string;
+		/** Earlier emails from this staff member to the recipient, oldest first. */
+		examples: string[];
+	};
 }
 
 type MessageParam = Anthropic.Beta.BetaMessageParam;
@@ -506,9 +513,22 @@ ${answer.slice(0, 12000)}
 		const transcript = chat.messages.slice(0, input.messageIndex + 1)
 			.map((m) => `<${m.role === 'user' ? 'support_staff' : 'jorgen'}>\n${m.content.slice(0, MAX_HISTORY_CHARS)}\n</${m.role === 'user' ? 'support_staff' : 'jorgen'}>`)
 			.join('\n\n');
+		const recipient  = input.recipient;
+		const examples   = recipient?.examples.slice(-MAX_REPLY_EXAMPLES) ?? [];
 		const language   = input.language === 'auto'
-			? 'Write in the language the customer wrote in, if the customer\'s own message is quoted in the conversation; otherwise in the language the support staff member writes in.'
+			? `Write in the language the customer wrote in, if the customer's own message is quoted in the conversation; otherwise ${examples.length > 0 ? 'in the language of the earlier emails to this person' : 'in the language the support staff member writes in'}.`
 			: `Write in ${REPLY_LANGUAGES[input.language]}.`;
+		const tone       = recipient?.toneNote || examples.length > 0
+			? `- Write the way this staff member writes to ${recipient!.name}: follow <tone_notes> and match <earlier_emails> in tone, length, form of address, greeting, sign-off and use of emojis - also when that is more personal or shorter than usual business email. Do not reuse the content of earlier emails. <instructions_from_support> overrides both.`
+			: '- Friendly, professional and brief.';
+		const context    = [
+			`<system_name>${chat.systemName || 'unknown'}</system_name>`,
+			recipient ? `<recipient>${recipient.name}</recipient>` : '',
+			recipient?.toneNote ? `<tone_notes>\n${recipient.toneNote}\n</tone_notes>` : '',
+			examples.length > 0 ? `<earlier_emails>\n${examples.map((text) => `<email>\n${text}\n</email>`).join('\n')}\n</earlier_emails>` : '',
+			`<conversation>\n${transcript}\n</conversation>`,
+			input.instructions?.trim() ? `<instructions_from_support>\n${input.instructions.trim()}\n</instructions_from_support>` : '',
+		].filter(Boolean).join('\n\n');
 
 		const response = await client.messages.create({
 			model        : MAIN_MODEL,
@@ -521,11 +541,12 @@ ${answer.slice(0, 12000)}
 - Leave out internal details: table and column names, SQL, code, file paths, function names, Sentry, the assistant and its tools. Write "we can see in your system" rather than naming where data was found. Leave out anything that only matters to support staff.
 - Keep SPY's screen labels and menu paths in English exactly as in the answer. Keep links into the customer's system as plain URLs.
 - Plain text for pasting into an email client: no markdown (no **, #, tables or code blocks). Short paragraphs; "- " for lists and steps.
-- Friendly, professional and brief. Start with a greeting (with the customer's name if the conversation gives it) and end with a sign-off${input.senderName ? ` from ${input.senderName}` : ''}. No subject line.
+${tone}
+- Start with a greeting (to ${recipient ? recipient.name : 'the customer by name if the conversation gives it'}) and end with a sign-off${input.senderName ? ` from ${input.senderName}` : ''}. No subject line.
 - Output only the email.`,
 			messages     : [{
 				role   : 'user',
-				content: `<system_name>${chat.systemName || 'unknown'}</system_name>\n\n<conversation>\n${transcript}\n</conversation>${input.instructions?.trim() ? `\n\n<instructions_from_support>\n${input.instructions.trim()}\n</instructions_from_support>` : ''}`,
+				content: context,
 			}],
 		});
 		const draft    = extractText(response.content);

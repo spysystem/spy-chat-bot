@@ -1,6 +1,7 @@
 .modal-content.reply-modal {
 	width: min(680px, calc(100vw - 48px));
 	max-height: calc(100vh - 48px);
+	overflow-y: auto;
 	display: flex;
 	flex-direction: column;
 	gap: 14px;
@@ -34,8 +35,63 @@
 	flex: 0 0 180px;
 }
 
-.reply-instructions {
+.reply-recipient {
 	flex: 1;
+}
+
+.reply-tone {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	padding: 12px 14px;
+	border: 1px solid var(--border-color);
+	border-radius: var(--radius-md);
+	background: var(--bg-secondary);
+}
+
+.reply-examples {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 6px 14px;
+	font-size: 12.5px;
+	color: var(--text-tertiary);
+}
+
+.link-button {
+	padding: 0;
+	border: none;
+	background: none;
+	color: var(--accent-color);
+	font-size: 12.5px;
+	font-weight: 500;
+}
+
+.link-button:hover {
+	text-decoration: underline;
+}
+
+.reply-paste {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.reply-paste textarea {
+	min-height: 110px;
+	padding: 10px 12px;
+	border: 1px solid var(--border-color);
+	border-radius: var(--radius-sm);
+	background: var(--bg-primary);
+	font-size: 13.5px;
+	line-height: 1.5;
+	resize: vertical;
+}
+
+.reply-paste-actions {
+	display: flex;
+	gap: 8px;
+	justify-content: flex-end;
 }
 
 .reply-field select,
@@ -53,13 +109,13 @@
 .reply-draft {
 	display: flex;
 	flex-direction: column;
-	min-height: 280px;
+	min-height: 240px;
 	flex: 1;
 }
 
 .reply-draft textarea {
 	flex: 1;
-	min-height: 280px;
+	min-height: 240px;
 	padding: 12px 14px;
 	border: 1px solid var(--border-color);
 	border-radius: var(--radius-md);

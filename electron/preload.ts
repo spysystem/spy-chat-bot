@@ -162,8 +162,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
 	updateChat: (chatId: string, messages: any[], update?: any) =>
 		ipcRenderer.invoke('update-chat', chatId, messages, update),
 
-	draftCustomerReply: (chatId: string, messageIndex: number, options: { language: string; instructions?: string }) =>
+	draftCustomerReply: (chatId: string, messageIndex: number, options: { language: string; instructions?: string; recipientName?: string }) =>
 		ipcRenderer.invoke('draft-customer-reply', chatId, messageIndex, options),
+
+	getReplyContacts: (chatId: string) =>
+		ipcRenderer.invoke('get-reply-contacts', chatId),
+
+	saveReplyTone: (chatId: string, name: string, toneNote: string) =>
+		ipcRenderer.invoke('save-reply-tone', chatId, name, toneNote),
+
+	addReplyExample: (chatId: string, name: string, text: string) =>
+		ipcRenderer.invoke('add-reply-example', chatId, name, text),
+
+	clearReplyExamples: (chatId: string, name: string) =>
+		ipcRenderer.invoke('clear-reply-examples', chatId, name),
 
 	deleteChat: (chatId: string) =>
 		ipcRenderer.invoke('delete-chat', chatId),

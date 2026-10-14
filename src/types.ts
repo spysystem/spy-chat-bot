@@ -20,6 +20,12 @@ export interface Message {
 
 export type ReplyLanguage = 'auto' | 'da' | 'en' | 'sv' | 'no' | 'de';
 
+export interface ReplyContactSummary {
+	name: string;
+	toneNote: string;
+	exampleCount: number;
+}
+
 export interface AttachmentMeta {
 	id: string;
 	originalName: string;
@@ -207,8 +213,13 @@ declare global {
 			}>, update?: ChatUpdate) => Promise<void>;
 			draftCustomerReply: (chatId: string, messageIndex: number, options: {
 				language: ReplyLanguage;
-				instructions?: string
+				instructions?: string;
+				recipientName?: string;
 			}) => Promise<string>;
+			getReplyContacts: (chatId: string) => Promise<ReplyContactSummary[]>;
+			saveReplyTone: (chatId: string, name: string, toneNote: string) => Promise<void>;
+			addReplyExample: (chatId: string, name: string, text: string) => Promise<void>;
+			clearReplyExamples: (chatId: string, name: string) => Promise<void>;
 			deleteChat: (chatId: string) => Promise<void>;
 			clearAllChats: () => Promise<void>;
 			clearWorkingSummary: (chatId: string) => Promise<void>;

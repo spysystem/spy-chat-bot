@@ -5,6 +5,7 @@ import {AttachmentService} from './services/attachment-service';
 import type {ChatMessage, ChatUpdate} from './services/chat-service';
 import {ChatService} from './services/chat-service';
 import {ClaudeService, type ReplyLanguage} from './services/claude-service';
+import {ReplyContactService} from './services/reply-contact-service';
 import {DatabaseService} from './services/database-service';
 import {GitInstallerService} from './services/git-installer-service';
 import type {GitHubConfig} from './services/github-service';
@@ -67,6 +68,7 @@ const attachmentService      = new AttachmentService(10 * 1024 * 1024);
 const chatService            = new ChatService();
 const githubService          = new GitHubService(secureStorage);
 const settingsService        = new SettingsService();
+const replyContactService    = new ReplyContactService();
 const systemDirectoryService = new SystemDirectoryService();
 const gitInstallerService    = new GitInstallerService();
 const sentryService          = new SentryService(secureStorage);
@@ -906,10 +908,45 @@ ipcMain.handle('update-chat', async (_event, chatId: string, messages: ChatMessa
 
 ipcMain.handle('draft-customer-reply', async (_event, chatId: string, messageIndex: number, options: {
 	language: ReplyLanguage;
-	instructions?: string
+	instructions?: string;
+	recipientName?: string;
 }) => {
-	const senderName = await settingsService.getUserName();
-	return await claudeService.draftCustomerReply({chatId, messageIndex, ...options, senderName: senderName || undefined});
+	const senderName    = await settingsService.getUserName();
+	const recipientName = options.recipientName?.trim();
+	const contact       = recipientName ? await replyContactService.get(await chatSystemKey(chatId), recipientName) : null;
+	return await claudeService.draftCustomerReply({
+		chatId,
+		messageIndex,
+		language    : options.language,
+		instructions: options.instructions,
+		senderName  : senderName || undefined,
+		recipient   : recipientName ? {
+			name    : contact?.name ?? recipientName,
+			toneNote: contact?.toneNote,
+			examples: contact?.examples.map((e) => e.text) ?? [],
+		} : undefined,
+	});
+});
+
+// Tone profiles belong to the chat's customer system; chats without one (dev) share the key ''.
+async function chatSystemKey(chatId: string): Promise<string> {
+	return (await chatService.getChat(chatId))?.systemKey?.trim() ?? '';
+}
+
+ipcMain.handle('get-reply-contacts', async (_event, chatId: string) => {
+	return await replyContactService.list(await chatSystemKey(chatId));
+});
+
+ipcMain.handle('save-reply-tone', async (_event, chatId: string, name: string, toneNote: string) => {
+	await replyContactService.saveToneNote(await chatSystemKey(chatId), name, toneNote);
+});
+
+ipcMain.handle('add-reply-example', async (_event, chatId: string, name: string, text: string) => {
+	await replyContactService.addExample(await chatSystemKey(chatId), name, text);
+});
+
+ipcMain.handle('clear-reply-examples', async (_event, chatId: string, name: string) => {
+	await replyContactService.clearExamples(await chatSystemKey(chatId), name);
 });
 
 ipcMain.handle('delete-chat', async (_event, chatId: string) => {
