@@ -389,6 +389,40 @@
 	color: var(--text-primary);
 }
 
+.follow-ups {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin-top: 4px;
+}
+
+.follow-up {
+	display: inline-flex;
+	align-items: center;
+	gap: 7px;
+	max-width: 100%;
+	padding: 7px 14px;
+	border-radius: 999px;
+	border: 1px solid var(--border-color);
+	background: var(--bg-elevated);
+	font-size: 13.5px;
+	text-align: left;
+	transition: border-color 0.15s ease, color 0.15s ease;
+}
+
+.follow-up .icon {
+	color: var(--text-tertiary);
+}
+
+.follow-up:hover {
+	border-color: var(--accent-color);
+	color: var(--accent-color);
+}
+
+.follow-up:hover .icon {
+	color: inherit;
+}
+
 /* Markdown answer */
 .markdown {
 	font-size: 14.5px;

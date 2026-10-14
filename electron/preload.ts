@@ -162,6 +162,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
 	updateChat: (chatId: string, messages: any[], update?: any) =>
 		ipcRenderer.invoke('update-chat', chatId, messages, update),
 
+	draftCustomerReply: (chatId: string, messageIndex: number, options: { language: string; instructions?: string }) =>
+		ipcRenderer.invoke('draft-customer-reply', chatId, messageIndex, options),
+
 	deleteChat: (chatId: string) =>
 		ipcRenderer.invoke('delete-chat', chatId),
 

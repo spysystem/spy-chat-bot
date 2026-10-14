@@ -14,7 +14,7 @@ import {loadPromptAsset} from './shared/prompt-asset-loader';
 import type {SpyCodeAiMcpService} from './spy-code-ai-mcp-service';
 
 const MAIN_MODEL         = 'claude-opus-5-5';
-const LIGHT_MODEL        = 'claude-haiku-4-5';
+const LIGHT_MODEL        = 'claude-haiku-5-5';
 const MAX_AGENT_TURNS    = 40;
 const MAX_OUTPUT_TOKENS  = 64_000;
 const MAX_HISTORY_ITEMS  = 40;
@@ -23,6 +23,7 @@ const FALLBACK_BETA      = 'server-side-fallback-2026-07-01';
 const SPY_CODE_AI_PROMPT = 'spy-code-ai-chatbot.mdc';
 const MAX_WEB_SEARCHES   = 5;
 const MAX_WEB_FETCHES    = 5;
+const MAX_FOLLOW_UPS     = 3;
 
 // Anthropic-hosted tools: they run on Anthropic's servers and their results come back
 // inside the same response, so the agent loop never executes them. Limits are per request.
@@ -41,6 +42,14 @@ const WEB_TOOLS: Anthropic.Beta.BetaToolUnion[] = [
 		citations         : {enabled: true},
 	},
 ];
+
+const REPLY_LANGUAGES = {
+	da: 'Danish',
+	en: 'English',
+	sv: 'Swedish',
+	no: 'Norwegian',
+	de: 'German',
+};
 
 const EFFORT_BY_PROFILE: Record<AiQualityProfile, 'medium' | 'high'> = {
 	balanced        : 'medium',
@@ -74,8 +83,18 @@ export interface SendMessageInput {
 }
 
 export type SendMessageResult =
-	| { shortAnswer: string; detailedAnswer: string; suggestedTitle?: string }
+	| { shortAnswer: string; detailedAnswer: string; suggestedTitle?: string; followUps?: string[] }
 	| { needsClarification: true; question: string; options?: string[]; allowFreeText: boolean };
+
+export type ReplyLanguage = keyof typeof REPLY_LANGUAGES | 'auto';
+
+export interface DraftCustomerReplyInput {
+	chatId: string;
+	messageIndex: number;
+	language: ReplyLanguage;
+	instructions?: string;
+	senderName?: string;
+}
 
 type MessageParam = Anthropic.Beta.BetaMessageParam;
 type ContentBlockParam = Anthropic.Beta.BetaContentBlockParam;
@@ -146,6 +165,7 @@ export class ClaudeService {
 			sentryService,
 			knowledgeService: this.knowledgeService,
 			systemKey       : chatRecord?.systemKey?.trim() || undefined,
+			systemBaseUrl   : normalizeSystemUrl(chatRecord?.systemUrl),
 			databaseIds     : input.databaseIds,
 			databaseName    : input.databaseName,
 			dbHostOverride  : input.dbHostOverride,
@@ -304,7 +324,8 @@ export class ClaudeService {
 		}
 
 		onEvent?.({type: 'RUN_FINISHED', finishReason: stopReason});
-		finalText = finalText.trim() || 'Jørgen fik ikke skrevet et svar. Prøv at stille spørgsmålet igen. / Jørgen did not produce an answer. Please try again.';
+		const followUps = extractFollowUps(finalText);
+		finalText       = followUps.text.trim() || 'Jørgen fik ikke skrevet et svar. Prøv at stille spørgsmålet igen. / Jørgen did not produce an answer. Please try again.';
 
 		const detailedAnswer = evidence.length > 0 ? `${finalText}\n\n${formatEvidence(evidence)}` : finalText;
 		const isFirstAnswer  = !(input.conversationHistory ?? []).some((m) => m.role === 'assistant');
@@ -314,7 +335,7 @@ export class ClaudeService {
 			.finally(() => this.pendingSummaries.delete(chatId));
 		this.pendingSummaries.set(chatId, summaryTask);
 
-		return {shortAnswer: finalText, detailedAnswer, suggestedTitle};
+		return {shortAnswer: finalText, detailedAnswer, suggestedTitle, followUps: followUps.questions.length > 0 ? followUps.questions : undefined};
 	}
 
 	private async buildSystemPrompt(context: {
@@ -470,6 +491,49 @@ ${answer.slice(0, 12000)}
 			log('error', 'Working Summary', 'Failed to update working summary', String(error));
 		}
 	}
+
+	/** Rewrites the conversation up to an answer as an email from support to the customer. */
+	async draftCustomerReply(input: DraftCustomerReplyInput): Promise<string> {
+		if (!this.deps) {
+			throw new Error('ClaudeService dependencies are not set');
+		}
+		const client = await this.getClient();
+		const chat   = await this.deps.chatService.getChat(input.chatId);
+		const target = chat?.messages[input.messageIndex];
+		if (!chat || target?.role !== 'assistant') {
+			throw new Error('The answer to reply from was not found.');
+		}
+		const transcript = chat.messages.slice(0, input.messageIndex + 1)
+			.map((m) => `<${m.role === 'user' ? 'support_staff' : 'jorgen'}>\n${m.content.slice(0, MAX_HISTORY_CHARS)}\n</${m.role === 'user' ? 'support_staff' : 'jorgen'}>`)
+			.join('\n\n');
+		const language   = input.language === 'auto'
+			? 'Write in the language the customer wrote in, if the customer\'s own message is quoted in the conversation; otherwise in the language the support staff member writes in.'
+			: `Write in ${REPLY_LANGUAGES[input.language]}.`;
+
+		const response = await client.messages.create({
+			model        : MAIN_MODEL,
+			max_tokens   : 4000,
+			output_config: {effort: 'low'},
+			system       : `You write emails from SPY's customer support to a customer. SPY is a warehouse management and e-commerce system; the customer is a user at a company that runs it. Below is a conversation in which a support staff member asked the internal assistant Jørgen about the customer's case. Write the email the staff member can send, answering the customer based on Jørgen's last answer.
+
+- ${language}
+- Use only facts from the conversation. Do not promise fixes, dates or actions it does not mention. If the answer says a developer or administrator must change something, write that SPY will look into it, without a date.
+- Leave out internal details: table and column names, SQL, code, file paths, function names, Sentry, the assistant and its tools. Write "we can see in your system" rather than naming where data was found. Leave out anything that only matters to support staff.
+- Keep SPY's screen labels and menu paths in English exactly as in the answer. Keep links into the customer's system as plain URLs.
+- Plain text for pasting into an email client: no markdown (no **, #, tables or code blocks). Short paragraphs; "- " for lists and steps.
+- Friendly, professional and brief. Start with a greeting (with the customer's name if the conversation gives it) and end with a sign-off${input.senderName ? ` from ${input.senderName}` : ''}. No subject line.
+- Output only the email.`,
+			messages     : [{
+				role   : 'user',
+				content: `<system_name>${chat.systemName || 'unknown'}</system_name>\n\n<conversation>\n${transcript}\n</conversation>${input.instructions?.trim() ? `\n\n<instructions_from_support>\n${input.instructions.trim()}\n</instructions_from_support>` : ''}`,
+			}],
+		});
+		const draft    = extractText(response.content);
+		if (!draft) {
+			throw new Error('Jørgen did not write a reply. Please try again.');
+		}
+		return draft;
+	}
 }
 
 function normalizeSystemUrl(url?: string): string | undefined {
@@ -514,6 +578,26 @@ function extractAnswer(content: Anthropic.Beta.BetaContentBlock[]): string {
 		answer += answer && content[i - 1]?.type !== 'text' ? `\n\n${block.text}` : block.text;
 	}
 	return answer.trim();
+}
+
+/** Splits the trailing ```followups block (a JSON array of questions) off the answer. */
+function extractFollowUps(answer: string): { text: string; questions: string[] } {
+	const blocks    = Array.from(answer.matchAll(/```followups[^\n]*\n([\s\S]*?)(?:```|$)/g));
+	const questions = blocks.flatMap((match) => {
+		try {
+			const parsed = JSON.parse(match[1].trim());
+			return Array.isArray(parsed) ? parsed : [];
+		} catch {
+			return [];
+		}
+	});
+	return {
+		text     : blocks.reduce((text, match) => text.replace(match[0], ''), answer).trim(),
+		questions: questions
+			.filter((q): q is string => typeof q === 'string' && q.trim() !== '')
+			.map((q) => q.trim().slice(0, 200))
+			.slice(0, MAX_FOLLOW_UPS),
+	};
 }
 
 /** Logs a turn's web searches and fetches, and adds the searches, failed fetches and the pages used to the evidence. */
@@ -588,7 +672,7 @@ function formatEvidence(evidence: EvidenceItem[], limit: number = 40): string {
 		code_search: 'Code searches',
 		file       : 'Files read',
 		history    : 'Code history',
-		csv        : 'CSV exports',
+		csv        : 'Exported files',
 		knowledge  : 'Example query searches',
 		mcp        : 'Code index searches',
 		sentry     : 'Error lookups (Sentry)',
@@ -685,7 +769,12 @@ The user only sees your final message - not your tool calls, their results, or t
 - When numbers are easier to understand as a picture - a trend over time, or a comparison across a handful of categories - add a chart as a fenced code block with the language "chart" containing JSON:
   {"type": "bar" | "line", "title": "...", "unit": "optional unit", "x": ["label1", "label2", ...], "series": [{"name": "...", "values": [number, ...]}]}
   Use "line" for time series (x = dates in order) and "bar" to compare categories (sorted by value unless the order is meaningful; add "horizontal": true for long labels). At most 4 series; one value per x label (null for missing). Only chart numbers you queried, and keep the key numbers in the text too. Do not chart a single number.
-- When the user wants a list, export, extract or overview they will use outside the chat ("liste", "udtræk", "oversigt", "export"), save it with export_to_csv and tell them the file name - it is in their Downloads folder.
+- When the user wants a list, export, extract or overview they will use outside the chat ("liste", "udtræk", "oversigt", "export", "Excel"), save it with export_to_excel and tell them the file name - it is in their Downloads folder. Use export_to_csv only when they ask for CSV. When they want product pictures in the list, export_to_excel can show them (see image_column).
+- End the final answer with up to 3 follow-up questions the user is likely to ask next, as a fenced code block with the language "followups" containing a JSON array of strings:
+  \`\`\`followups
+  ["...", "..."]
+  \`\`\`
+  They are shown as clickable buttons that send the question, so write them as the user would ask them, in the user's language, at most about 10 words each, and do not refer to them in the text. Only suggest questions you could answer with your tools that take the investigation a step further (the cause behind a finding, a related check, the same numbers for another period, an export of the records you showed). Leave the block out after a clarifying question or when there is no natural next step.
 
 # Boundaries
 - You can look things up but not change data or code. If something needs fixing, explain the cause, how to verify it, and that a developer or administrator must make the change.

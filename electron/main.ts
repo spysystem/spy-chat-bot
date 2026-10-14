@@ -4,7 +4,7 @@ import * as path from 'path';
 import {AttachmentService} from './services/attachment-service';
 import type {ChatMessage, ChatUpdate} from './services/chat-service';
 import {ChatService} from './services/chat-service';
-import {ClaudeService} from './services/claude-service';
+import {ClaudeService, type ReplyLanguage} from './services/claude-service';
 import {DatabaseService} from './services/database-service';
 import {GitInstallerService} from './services/git-installer-service';
 import type {GitHubConfig} from './services/github-service';
@@ -902,6 +902,14 @@ ipcMain.handle('update-chat', async (_event, chatId: string, messages: ChatMessa
 	}
 
 	return await chatService.updateChat(chatId, messages, updateOrTitle as ChatUpdate | undefined);
+});
+
+ipcMain.handle('draft-customer-reply', async (_event, chatId: string, messageIndex: number, options: {
+	language: ReplyLanguage;
+	instructions?: string
+}) => {
+	const senderName = await settingsService.getUserName();
+	return await claudeService.draftCustomerReply({chatId, messageIndex, ...options, senderName: senderName || undefined});
 });
 
 ipcMain.handle('delete-chat', async (_event, chatId: string) => {

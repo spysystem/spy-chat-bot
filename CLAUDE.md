@@ -70,17 +70,19 @@ npm run package:linux          # Linux (AppImage)
 
 **ClaudeService** (`electron/services/claude-service.ts`)
 
-- Uses the official `@anthropic-ai/sdk` directly (no TanStack/OpenAI layer). Model `claude-opus-5-5` (`MAIN_MODEL`); title and working-summary calls use `claude-haiku-4-5`
+- Uses the official `@anthropic-ai/sdk` directly (no TanStack/OpenAI layer). Model `claude-opus-5-5` (`MAIN_MODEL`); title and working-summary calls use `claude-haiku-5-5` (`LIGHT_MODEL`)
 - One streaming agent loop (`client.beta.messages.stream`): adaptive thinking (`display: "summarized"`), `output_config.effort` from the quality setting (Balanced = `medium`, Maximum Accuracy = `high`), prompt caching (static system block + automatic top-level cache), server-side refusal fallback (`fallbacks: "default"`, beta `server-side-fallback-2026-07-01`)
 - Up to 40 model turns; tool calls in a turn run in parallel; the last turn uses `tool_choice: none` so the model must answer
 - The model writes the user-facing answer itself - there is no separate "simplification" pass. `detailedAnswer` = answer + an "Investigation details" appendix (SQL run, files read, searches) built from the tool evidence log
 - System prompt = `STATIC_SYSTEM_PROMPT` (cached) + a per-request block (connected database, branch, available sources, working summary). The full prompt is logged to the Debug window as "Claude system prompt" on every question
 - After each answer a working summary is written in the background (Haiku) and stored on the chat; the next turn waits for it
+- The model ends an answer with a ` ```followups ` block (JSON array, max 3). `extractFollowUps()` strips it from the answer, the questions are stored as `followUps` on the message and shown as buttons under the latest answer (`hideFollowUps()` in `src/ai/stream-message.ts` hides the block while streaming)
+- `draftCustomerReply()` ("Reply to customer" on an answer, `CustomerReplyModal.tsx`): one tool-less call (`MAIN_MODEL`, effort `low`) that rewrites the conversation up to that answer as a plain-text email to the customer, without internal details, in a chosen language or the customer's
 - Emits AG-UI-style events to the renderer (`TEXT_MESSAGE_START/CONTENT/END` with a per-turn `messageId`, `TOOL_CALL_START/END`, `STEP_STARTED/FINISHED` for thinking, `RUN_STARTED/FINISHED`). The renderer replaces the streamed text when a new turn starts, so pre-tool progress notes are not kept
 
 **Agent tools** (`electron/services/claude-tools.ts`) - only registered when the source is configured:
 
-- Database: `search_schema`, `describe_table` (schema index per connection + release branch, falls back to live `DESCRIBE`; `refreshSchemaIndex()` in `main.ts` builds it in the background from the chat's own database/host when missing or older than a day), `query_database` (≤200 rows as TSV; errors come back with schema suggestions), `export_to_csv` (full result to Downloads, UTF-8 BOM)
+- Database: `search_schema`, `describe_table` (schema index per connection + release branch, falls back to live `DESCRIBE`; `refreshSchemaIndex()` in `main.ts` builds it in the background from the chat's own database/host when missing or older than a day), `query_database` (≤200 rows as TSV; errors come back with schema suggestions), `export_to_excel` (full result to Downloads as .xlsx via `excel-export.ts`, numbers/dates as real values; with `image_column` a column of `files.id` becomes product pictures) and `export_to_csv` (only when CSV is asked for, UTF-8 BOM)
 - Code (local clone): `search_code` (ripgrep; literal by default, optional regex/path/glob/context), `read_file` (line ranges, 1500 lines per call), `list_directory`, `find_files`. Without a local clone, GitHub API fallbacks for `search_code`/`read_file`/`list_directory`
 - Code history (local clone): `file_history` (commits touching a path, optional pickaxe `search`, each annotated with the first `YYYY_MM` release branch containing it), `show_commit`, `compare_branches` (e.g. `2026_07..2026_09`)
 - Sentry (when a token is set in Settings): `search_errors` (issues + counts for the chat's system via the `system_key` tag, Discover events API) and `get_error_details` (latest event's stack trace, request, breadcrumbs; server paths trimmed to repo paths)
@@ -192,9 +194,11 @@ To require users to update (cannot dismiss modal):
 - `App.tsx` - Integrates modal with auto-update events
 - `electron/main.ts:23` - `autoUpdater.autoDownload = true` for automatic downloads
 
-### CSV Export
+### Excel / CSV Export
 
-When users ask for a list/export/extract ("liste", "udtræk", "oversigt", "export"), the system prompt tells the model to call `export_to_csv`. Files are saved to the Downloads folder as `<descriptive_name>_YYYY-MM-DD_HH-MM-SS.csv` and the model names the file in its answer.
+When users ask for a list/export/extract ("liste", "udtræk", "oversigt", "export"), the system prompt tells the model to call `export_to_excel` (`export_to_csv` only when CSV is asked for). Files are saved to the Downloads folder as `<descriptive_name>_YYYY-MM-DD_HH-MM-SS.xlsx` and the model names the file in its answer.
+
+Product pictures: the tool description gives the model a subquery for a style colour's main picture (`style_media`/`style_color_media`, written with `EXISTS` because MySQL 5.7 rejects outer columns in a subquery's `JOIN ... ON`). The tool turns the `files.id` values into public signed links (`/file/{files.uuid}/{files_signed.uuid}/{name}`, only `files_signed` rows with `max_read_limit = 0`, since the plain `/file/` URL needs a login and reading a limited link uses it up), downloads them from the chat's `systemUrl`, shrinks them with `nativeImage` and embeds them. Pictures without such a link are left empty and counted in the tool result.
 
 ### Record Links and Charts in Answers
 

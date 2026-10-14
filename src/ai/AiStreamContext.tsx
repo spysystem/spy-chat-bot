@@ -1,5 +1,5 @@
 import React, {createContext, JSX, useContext, useEffect, useMemo, useRef, useState} from 'react';
-import type {AttachmentMeta} from '../types';
+import type {AttachmentMeta, Chat} from '../types';
 
 type AiStreamStatus = 'idle' | 'running' | 'stopping' | 'error';
 
@@ -139,18 +139,13 @@ export function AiStreamProvider({children}: { children: React.ReactNode }): JSX
 			// where the UI refreshes before the assistant message is stored.
 			try {
 				const chat             = await window.electronAPI.getChat(chatId);
-				const existingMessages = (chat?.messages || []).map((m) => ({
-					role           : m.role,
-					content        : m.content,
-					detailedContent: (m as any).detailedContent,
-					timestamp      : m.timestamp,
-					attachments    : (m as any).attachments,
-				}));
+				const existingMessages = storedMessages(chat);
 
 				const assistantMessage: any = {
 					role           : 'assistant',
 					content        : payload.result.shortAnswer,
 					detailedContent: payload.result.detailedAnswer || undefined,
+					followUps      : payload.result.followUps,
 					timestamp      : new Date().toISOString(),
 				};
 
@@ -179,13 +174,7 @@ export function AiStreamProvider({children}: { children: React.ReactNode }): JSX
 			// Persist the assistant question so it appears in the chat
 			try {
 				const chat             = await window.electronAPI.getChat(chatId);
-				const existingMessages = (chat?.messages || []).map((m) => ({
-					role           : m.role,
-					content        : m.content,
-					detailedContent: (m as any).detailedContent,
-					timestamp      : m.timestamp,
-					attachments    : (m as any).attachments,
-				}));
+				const existingMessages = storedMessages(chat);
 
 				const assistantMessage: any = {
 					role     : 'assistant',
@@ -325,13 +314,7 @@ export function AiStreamProvider({children}: { children: React.ReactNode }): JSX
 				void (async () => {
 					try {
 						const chat             = await window.electronAPI.getChat(input.chatId);
-						const existingMessages = (chat?.messages || []).map((m) => ({
-							role           : m.role,
-							content        : m.content,
-							detailedContent: (m as any).detailedContent,
-							timestamp      : m.timestamp,
-							attachments    : (m as any).attachments,
-						}));
+						const existingMessages = storedMessages(chat);
 
 						const userMessage: any = {
 							role       : 'user',
@@ -379,13 +362,7 @@ export function AiStreamProvider({children}: { children: React.ReactNode }): JSX
 
 				// Persist user response
 				const chat             = await window.electronAPI.getChat(chatId);
-				const existingMessages = (chat?.messages || []).map((m) => ({
-					role           : m.role,
-					content        : m.content,
-					detailedContent: (m as any).detailedContent,
-					timestamp      : m.timestamp,
-					attachments    : (m as any).attachments,
-				}));
+				const existingMessages = storedMessages(chat);
 
 				const userMessage: any = {
 					role       : 'user',
@@ -451,6 +428,17 @@ export function AiStreamProvider({children}: { children: React.ReactNode }): JSX
 			{children}
 		</AiStreamContext.Provider>
 	);
+}
+
+function storedMessages(chat: Chat | null): Chat['messages'] {
+	return (chat?.messages || []).map((m) => ({
+		role           : m.role,
+		content        : m.content,
+		detailedContent: m.detailedContent,
+		followUps      : m.followUps,
+		timestamp      : m.timestamp,
+		attachments    : m.attachments,
+	}));
 }
 
 export function useAiStreams(): AiStreamContextValue {

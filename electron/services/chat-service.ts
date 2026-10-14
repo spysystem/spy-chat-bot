@@ -7,6 +7,7 @@ export interface ChatMessage {
 	role: 'user' | 'assistant';
 	content: string;
 	detailedContent?: string;
+	followUps?: string[];
 	timestamp: string;
 	attachments?: Array<{
 		id: string;

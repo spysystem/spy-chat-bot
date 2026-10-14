@@ -13,9 +13,12 @@ export interface Message {
 	role: 'user' | 'assistant';
 	content: string;
 	detailedContent?: string;
+	followUps?: string[];
 	timestamp: Date;
 	attachments?: AttachmentMeta[];
 }
+
+export type ReplyLanguage = 'auto' | 'da' | 'en' | 'sv' | 'no' | 'de';
 
 export interface AttachmentMeta {
 	id: string;
@@ -33,6 +36,7 @@ export interface Chat {
 		role: 'user' | 'assistant';
 		content: string;
 		detailedContent?: string;
+		followUps?: string[];
 		timestamp: string;
 		attachments?: AttachmentMeta[];
 	}>;
@@ -178,7 +182,7 @@ declare global {
 			onAiEvent: (callback: (payload: { streamId: string; event: any }) => void) => () => void;
 			onAiStreamFinished: (callback: (payload: {
 				streamId: string;
-				result: { shortAnswer: string; detailedAnswer: string; suggestedTitle?: string };
+				result: { shortAnswer: string; detailedAnswer: string; suggestedTitle?: string; followUps?: string[] };
 			}) => void) => () => void;
 			onAiStreamError: (callback: (payload: { streamId: string; error: string }) => void) => () => void;
 			onAiAskingClarification: (callback: (payload: {
@@ -201,6 +205,10 @@ declare global {
 				detailedContent?: string;
 				timestamp: string
 			}>, update?: ChatUpdate) => Promise<void>;
+			draftCustomerReply: (chatId: string, messageIndex: number, options: {
+				language: ReplyLanguage;
+				instructions?: string
+			}) => Promise<string>;
 			deleteChat: (chatId: string) => Promise<void>;
 			clearAllChats: () => Promise<void>;
 			clearWorkingSummary: (chatId: string) => Promise<void>;

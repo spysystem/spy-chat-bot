@@ -1,8 +1,8 @@
 import type Anthropic from '@anthropic-ai/sdk';
-import {app} from 'electron';
 import * as fs from 'fs/promises';
 import path from 'path';
 import type {DatabaseService} from './database-service';
+import {exportFilePath, exportToExcelFile} from './excel-export';
 import type {GitHubService} from './github-service';
 import type {KnowledgeService} from './knowledge-service';
 import type {CommitSummary} from './local-repo-service';
@@ -38,6 +38,8 @@ export interface ToolContext {
 	knowledgeService: KnowledgeService;
 	sentryService: SentryService;
 	systemKey?: string;
+	/** The customer system's base URL (https://host), used to download product pictures. */
+	systemBaseUrl?: string;
 	databaseIds: string[];
 	databaseName?: string;
 	dbHostOverride?: string;
@@ -171,10 +173,7 @@ async function exportToCsvFile(baseName: string, rows: Array<Record<string, unkn
 	filePath: string;
 	rowCount: number
 }> {
-	const safeBase = baseName.replace(/\.csv$/i, '').replace(/[^\p{L}\p{N}._ -]/gu, '_').replace(/^[.\s]+/, '').slice(0, 80) || 'export';
-	const now      = new Date();
-	const stamp    = `${now.toISOString().slice(0, 10)}_${now.toTimeString().slice(0, 8).replace(/:/g, '-')}`;
-	const filePath = path.join(app.getPath('downloads'), `${safeBase}_${stamp}.csv`);
+	const filePath = exportFilePath(baseName, 'csv');
 	const cols     = columns.length > 0 ? columns : Object.keys(rows[0] ?? {});
 	const lines    = [cols.map(csvValue).join(','), ...rows.map((row) => cols.map((c) => csvValue(row[c])).join(','))];
 	// BOM so Excel opens UTF-8 (æ, ø, å) correctly.
@@ -202,7 +201,7 @@ function tool(
 export async function createAgentTools(ctx: ToolContext): Promise<AgentToolset> {
 	const {
 			  databaseService, githubService, schemaIndexService, spyCodeAiMcpService, knowledgeService, sentryService, systemKey,
-			  databaseIds, databaseName, dbHostOverride, branch, onProgress, onDebugLog, evidence,
+			  systemBaseUrl, databaseIds, databaseName, dbHostOverride, branch, onProgress, onDebugLog, evidence,
 		  } = ctx;
 
 	const configs            = await databaseService.getConfigs();
@@ -359,7 +358,7 @@ export async function createAgentTools(ctx: ToolContext): Promise<AgentToolset> 
 
 		tools.push(tool(
 			'export_to_csv',
-			'Run a read-only SELECT and save the complete result (no row limit) as a CSV file in the user\'s Downloads folder. Use when the user asks for a list, export, extract or overview they will work with outside the chat.',
+			'Run a read-only SELECT and save the complete result (no row limit) as a CSV file in the user\'s Downloads folder. Only when the user asks for CSV; otherwise use export_to_excel.',
 			{
 				sql     : {type: 'string', description: 'A single read-only SELECT statement'},
 				filename: {type: 'string', description: 'Descriptive base filename without extension, e.g. "active_customers_brand_x"'},
@@ -385,6 +384,80 @@ export async function createAgentTools(ctx: ToolContext): Promise<AgentToolset> 
 				}
 			},
 		));
+
+		const pictureHelp = systemBaseUrl
+			? ' To show product pictures, select the picture\'s files.id in a column and give that column\'s name as image_column; its cells then show the picture instead of the id. Main picture of a style colour (styles.sId = s, styles_colors.scId = sc): (SELECT sm.file_id FROM style_media sm WHERE sm.style_id = s AND sm.type = \'image\' ORDER BY EXISTS(SELECT 1 FROM style_color_media scm WHERE scm.style_media_id = sm.id AND scm.style_color_id = sc) DESC, sm.is_main DESC, sm.position, sm.id LIMIT 1) - keep this form, MySQL 5.7 rejects outer columns in a subquery\'s JOIN ... ON. For a style without colour: (SELECT sm.file_id FROM style_media sm WHERE sm.style_id = s AND sm.type = \'image\' ORDER BY sm.is_main DESC, sm.position, sm.id LIMIT 1). Put the picture column first unless the user wants it elsewhere.'
+			: ' Product pictures are not available: this chat has no system URL.';
+		tools.push(tool(
+			'export_to_excel',
+			`Run a read-only SELECT and save the complete result (no row limit) as an Excel file (.xlsx) in the user's Downloads folder, with a bold frozen header row, filters, and numbers and dates as real Excel values. Use when the user asks for a list, export, extract or overview they will work with outside the chat. Column aliases become the headers, so name them in the user's language.${pictureHelp}`,
+			{
+				sql         : {type: 'string', description: 'A single read-only SELECT statement'},
+				filename    : {type: 'string', description: 'Descriptive base filename without extension, e.g. "best_selling_styles_26_autumn"'},
+				image_column: {type: 'string', description: 'Optional: the result column holding files.id of a picture to show'},
+				...dbIdProperty,
+			},
+			['sql', 'filename'],
+			async (input) => {
+				const db          = resolveDb(input);
+				const sql         = str(input, 'sql', true);
+				const filename    = str(input, 'filename', true);
+				const imageColumn = str(input, 'image_column');
+				if (imageColumn && !systemBaseUrl) {
+					return {content: 'Pictures cannot be downloaded because this chat has no system URL. Export without image_column, or ask the user to pick the system for the chat.', isError: true};
+				}
+				onProgress?.(`Exporting Excel: ${filename}`);
+				try {
+					const result = await databaseService.executeQuery(db.id, sql, databaseName, dbHostOverride);
+					if (result.rows.length === 0) {
+						return {content: 'The query returned no rows, so no file was written.'};
+					}
+					if (imageColumn && !result.columns.includes(imageColumn)) {
+						return {content: `The result has no column "${imageColumn}". Columns: ${result.columns.join(', ')}`, isError: true};
+					}
+					const images = imageColumn ? {
+						column    : imageColumn,
+						urlByKey  : await signedPictureUrls(db.id, result.rows.map((row) => row[imageColumn])),
+						onProgress: (done: number, total: number) => {
+							if (done === total || done % 10 === 0) {
+								onProgress?.(`Downloading pictures: ${done}/${total}`);
+							}
+						},
+					} : undefined;
+					const file   = await exportToExcelFile(filename, result.rows, result.columns, images);
+					const detail = imageColumn ? `${file.rowCount} rows, ${file.imageCount} with picture` : `${file.rowCount} rows`;
+					evidence.push({kind: 'csv', label: path.basename(file.filePath), detail});
+					const pictures = imageColumn
+						? ` ${file.imageCount} rows show a picture.${file.missingImageCount > 0 ? ` ${file.missingImageCount} rows have none: the style has no picture in SPY, or the picture has no public link that can be downloaded without logging in.` : ''}`
+						: '';
+					return {content: `Saved ${file.rowCount} rows to ${file.filePath}.${pictures}`};
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					return {content: `Export failed: ${message}${await schemaHint(db.id, message)}`, isError: true};
+				}
+			},
+		));
+	}
+
+	/**
+	 * Public URLs of pictures by files.id. Only signed links without a read limit are used: the
+	 * normal /file/ URL needs a login, and downloading a limited link would use up its reads.
+	 */
+	async function signedPictureUrls(configId: string, fileIds: unknown[]): Promise<Map<string, string>> {
+		const ids  = Array.from(new Set(fileIds.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)));
+		const urls = new Map<string, string>();
+		for (let start = 0; start < ids.length; start += 500) {
+			const chunk  = ids.slice(start, start + 500);
+			const result = await databaseService.executeQuery(configId, `SELECT f.id, f.uuid, f.file_name, MIN(fs.uuid) AS signed_uuid
+				FROM files f
+				JOIN files_signed fs ON fs.file_id = f.id AND fs.max_read_limit = 0
+				WHERE f.is_deleted = 0 AND f.id IN (${chunk.join(',')})
+				GROUP BY f.id, f.uuid, f.file_name`, databaseName, dbHostOverride);
+			for (const row of result.rows) {
+				urls.set(String(row.id), `${systemBaseUrl}/file/${row.uuid}/${row.signed_uuid}/${encodeURIComponent(String(row.file_name))}`);
+			}
+		}
+		return urls;
 	}
 
 	async function schemaHint(configId: string, errorMessage: string): Promise<string> {

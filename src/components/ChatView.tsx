@@ -8,6 +8,7 @@ import './ChatView.css';
 import type {AiQualityProfile, AttachmentMeta, Chat, ChatUpdate, DatabaseConfig, Message, SystemDirectorySystem} from '../types';
 import {resolveSystemBranch} from '../../electron/services/shared/release-branch';
 import {MarkdownPre} from './ChartBlock';
+import {CustomerReplyModal} from './CustomerReplyModal';
 import {Icon, type IconName} from './Icon';
 import {type TranslationKey, useI18n} from '../i18n';
 import 'highlight.js/styles/github-dark.css';
@@ -45,6 +46,7 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 	const [filterDev, setFilterDev]                 = useState<boolean>(false);
 	const [copiedIndex, setCopiedIndex]             = useState<number | null>(null);
 	const [isDragging, setIsDragging]               = useState<boolean>(false);
+	const [replyMessageIndex, setReplyMessageIndex] = useState<number | null>(null);
 
 	const systemSelectorReference = useRef<HTMLDivElement>(null);
 	const systemInputReference    = useRef<HTMLInputElement>(null);
@@ -132,6 +134,10 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 
 		return () => clearTimeout(handle);
 	}, [chatId, inputValue]);
+
+	useEffect(() => {
+		setReplyMessageIndex(null);
+	}, [chatId]);
 
 	useEffect(() => {
 		// Load chat messages when chatId changes or on mount
@@ -288,6 +294,7 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 			role           : m.role,
 			content        : m.content,
 			detailedContent: m.detailedContent,
+			followUps      : m.followUps,
 			timestamp      : m.timestamp.toISOString(),
 			attachments    : m.attachments,
 		}));
@@ -333,6 +340,7 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 			role           : m.role,
 			content        : m.content,
 			detailedContent: m.detailedContent,
+			followUps      : m.followUps,
 			timestamp      : m.timestamp.toISOString(),
 			attachments    : m.attachments,
 		}));
@@ -473,8 +481,9 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 		setPendingAttachments((prev) => prev.filter((a) => a.id !== id));
 	}
 
-	async function handleSend(): Promise<void> {
-		if ((!inputValue.trim() && pendingAttachments.length === 0) || isSending || isStreamRunning) {
+	/** Sends the composer contents, or `followUp` (a clicked suggestion) without touching the composer. */
+	async function handleSend(followUp?: string): Promise<void> {
+		if ((!followUp && !inputValue.trim() && pendingAttachments.length === 0) || isSending || isStreamRunning) {
 			return;
 		}
 
@@ -494,20 +503,23 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 			return;
 		}
 
-		const messageText          = inputValue;
+		const messageText          = followUp ?? inputValue;
+		const attachments          = followUp ? [] : pendingAttachments;
 		const userMessage: Message = {
 			role       : 'user',
 			content    : messageText,
 			timestamp  : new Date(),
-			attachments: pendingAttachments.length > 0 ? pendingAttachments : undefined,
+			attachments: attachments.length > 0 ? attachments : undefined,
 		};
 
 		const newMessages = [...messages, userMessage];
 		stickToBottomReference.current = true;
 		setMessages(newMessages);
-		setInputValue('');
-		clearDraft(chatId);
-		setPendingAttachments([]);
+		if (!followUp) {
+			setInputValue('');
+			clearDraft(chatId);
+			setPendingAttachments([]);
+		}
 		setIsSending(true);
 
 		try {
@@ -537,7 +549,7 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 					dbHost      : effectiveDbHost,
 					githubBranch: effectiveGithubBranch,
 				},
-				attachments: pendingAttachments,
+				attachments,
 			});
 			onChatUpdate();
 		} catch (error) {
@@ -952,6 +964,16 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 											<Icon name={copiedIndex === index ? 'check' : 'copy'} size={14}/>
 											{copiedIndex === index ? t('chat.copied') : t('chat.copy')}
 										</button>
+										{index < messages.length && (
+											<button
+												className="message-action"
+												onClick={() => setReplyMessageIndex(index)}
+												title={t('chat.replyTooltip')}
+											>
+												<Icon name="mail" size={14}/>
+												{t('chat.replyToCustomer')}
+											</button>
+										)}
 										{hasDetailed && (
 											<button
 												className={`message-action ${isExpanded ? 'active' : ''}`}
@@ -962,6 +984,16 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 												{isExpanded ? t('chat.hideDetails') : t('chat.showDetails')}
 											</button>
 										)}
+									</div>
+								)}
+								{index === messages.length - 1 && !isBusy && !clarificationRequest && message.followUps && message.followUps.length > 0 && (
+									<div className="follow-ups" aria-label={t('chat.followUpsLabel')}>
+										{message.followUps.map((question) => (
+											<button key={question} className="follow-up" onClick={() => void handleSend(question)}>
+												<Icon name="arrowUp" size={13}/>
+												{question}
+											</button>
+										))}
 									</div>
 								)}
 							</div>
@@ -1087,7 +1119,7 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 						) : (
 							<button
 								type="button"
-								onClick={handleSend}
+								onClick={() => void handleSend()}
 								className="send-button"
 								disabled={isBusy || (!inputValue.trim() && pendingAttachments.length === 0)}
 								title={t('chat.send')}
@@ -1101,6 +1133,10 @@ export function ChatView({chatId, onChatUpdate}: ChatViewProps): JSX.Element {
 					{t('chat.footnote')}
 				</div>
 			</div>
+
+			{replyMessageIndex !== null && (
+				<CustomerReplyModal chatId={chatId} messageIndex={replyMessageIndex} onClose={() => setReplyMessageIndex(null)}/>
+			)}
 
 			{isDragging && (
 				<div className="drop-overlay">
