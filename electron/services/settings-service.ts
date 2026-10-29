@@ -4,11 +4,10 @@ import * as path from 'path';
 
 export type AiQualityProfile = 'balanced' | 'maximum_accuracy';
 
-/** The last export to Admin's assistant, and whether its first-start modal was answered. */
+/** The last export to Admin's assistant. */
 export interface AssistantExportState {
 	exportedAt?: string;
 	filePath?: string;
-	promptDismissed?: boolean;
 }
 
 export interface UserSettings {

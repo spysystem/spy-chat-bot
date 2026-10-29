@@ -6,7 +6,8 @@ import {SettingsSection} from './SettingsSection';
 import './AssistantExport.css';
 
 // The export to Admin's assistant, offered in three places that share one state: a modal at the
-// first start, a banner at the top of the chat list and a section in Settings.
+// first start, a banner at the top of the chat list and a section in Settings. The first export is
+// made at the end of Jørgen's funeral (JorgenFarewell); later ones are made directly.
 
 interface AssistantExportContextValue {
 	/** null until loaded from the main process. */
@@ -16,17 +17,20 @@ interface AssistantExportContextValue {
 	result: AssistantExportResult | null;
 	error: string;
 	exportNow: () => Promise<void>;
-	dismissPrompt: () => Promise<void>;
 	showFile: () => void;
+	farewellOpen: boolean;
+	openFarewell: () => void;
+	closeFarewell: () => void;
 }
 
 const AssistantExportContext = createContext<AssistantExportContextValue | undefined>(undefined);
 
 export function AssistantExportProvider({children}: { children: ReactNode }): JSX.Element {
-	const [state, setState]         = useState<AssistantExportState | null>(null);
-	const [exporting, setExporting] = useState(false);
-	const [result, setResult]       = useState<AssistantExportResult | null>(null);
-	const [error, setError]         = useState('');
+	const [state, setState]               = useState<AssistantExportState | null>(null);
+	const [exporting, setExporting]       = useState(false);
+	const [result, setResult]             = useState<AssistantExportResult | null>(null);
+	const [error, setError]               = useState('');
+	const [farewellOpen, setFarewellOpen] = useState(false);
 
 	useEffect(() => {
 		void window.electronAPI.getAssistantExportState().then(setState);
@@ -54,18 +58,18 @@ export function AssistantExportProvider({children}: { children: ReactNode }): JS
 				setExporting(false);
 			}
 		},
-		dismissPrompt: async () => {
-			setState(await window.electronAPI.dismissAssistantExportPrompt());
-		},
 		showFile     : () => {
 			void window.electronAPI.showAssistantExport();
 		},
-	}), [state, exporting, result, error]);
+		farewellOpen,
+		openFarewell : () => setFarewellOpen(true),
+		closeFarewell: () => setFarewellOpen(false),
+	}), [state, exporting, result, error, farewellOpen]);
 
 	return <AssistantExportContext.Provider value={value}>{children}</AssistantExportContext.Provider>;
 }
 
-function useAssistantExport(): AssistantExportContextValue {
+export function useAssistantExport(): AssistantExportContextValue {
 	const context = useContext(AssistantExportContext);
 	if (!context) {
 		throw new Error('useAssistantExport must be used inside AssistantExportProvider');
@@ -79,21 +83,29 @@ function useExportedDate(): string {
 	return state?.exportedAt ? new Date(state.exportedAt).toLocaleDateString(locale, {day: 'numeric', month: 'long', year: 'numeric'}) : '';
 }
 
-/** Export, or Export again once one is made. */
+/** Say goodbye (the funeral, which ends with the export), or Export again once one is made. */
 function ExportButton({primary}: { primary: boolean }): JSX.Element {
-	const {state, exporting, exportNow} = useAssistantExport();
-	const {t}                           = useI18n();
+	const {state, exporting, exportNow, openFarewell} = useAssistantExport();
+	const {t}                                         = useI18n();
 
+	if (!state?.exportedAt) {
+		return (
+			<button className={`btn ${primary ? 'btn-primary' : ''}`} onClick={openFarewell} disabled={!state}>
+				<Icon name="candle" size={14}/>
+				{t('export.farewell')}
+			</button>
+		);
+	}
 	return (
-		<button className={`btn ${primary ? 'btn-primary' : ''}`} onClick={() => void exportNow()} disabled={exporting || !state}>
+		<button className={`btn ${primary ? 'btn-primary' : ''}`} onClick={() => void exportNow()} disabled={exporting}>
 			<Icon name="download" size={14}/>
-			{exporting ? t('export.exporting') : state?.exportedAt ? t('export.again') : t('export.button')}
+			{exporting ? t('export.exporting') : t('export.again')}
 		</button>
 	);
 }
 
 /** Where the file went and what it holds; the folder opens on a click. */
-function ExportOutcome(): JSX.Element | null {
+export function ExportOutcome(): JSX.Element | null {
 	const {result, error, showFile} = useAssistantExport();
 	const {t}                       = useI18n();
 
@@ -122,14 +134,14 @@ function ExportOutcome(): JSX.Element | null {
 	);
 }
 
-/** Shown once, at the first start after the update; Later lets a supporter on a call carry on. */
+/** Shown at every start until an export is made; it cannot be put off, the funeral has to be watched. */
 export function AssistantExportModal(): JSX.Element | null {
-	const {state, exporting, result, error, exportNow, dismissPrompt} = useAssistantExport();
-	const {t}                                                          = useI18n();
-	const [open, setOpen]                                              = useState(false);
+	const {state, openFarewell} = useAssistantExport();
+	const {t}                   = useI18n();
+	const [open, setOpen]       = useState(false);
 
 	useEffect(() => {
-		if (state && !state.promptDismissed && !state.exportedAt) {
+		if (state && !state.exportedAt) {
 			setOpen(true);
 		}
 	}, [state]);
@@ -138,37 +150,25 @@ export function AssistantExportModal(): JSX.Element | null {
 		return null;
 	}
 
-	const done = result !== null;
 	return (
 		<div className="assistant-export-overlay">
 			<div className="assistant-export-modal" role="dialog" aria-modal="true" aria-labelledby="assistant-export-title">
-				<div className={`assistant-export-icon ${done ? 'done' : ''}`}>
-					<Icon name={done ? 'check' : 'download'} size={24}/>
+				<div className="assistant-export-icon">
+					<Icon name="candle" size={24}/>
 				</div>
-				<h2 id="assistant-export-title">{done ? t('export.doneTitle') : t('export.title')}</h2>
-				<p>{done ? t('export.importThere') : t('export.text')}</p>
-				{(done || error) && <ExportOutcome/>}
+				<h2 id="assistant-export-title">{t('export.farewellTitle')}</h2>
 				<div className="assistant-export-actions">
-					{done ? (
-						<button className="btn btn-primary btn-large" onClick={() => setOpen(false)} autoFocus>{t('export.close')}</button>
-					) : (
-						<>
-							<button className="btn btn-primary btn-large" onClick={() => void exportNow()} disabled={exporting} autoFocus>
-								<Icon name="download" size={16}/>
-								{exporting ? t('export.exporting') : t('export.button')}
-							</button>
-							<button
-								className="btn"
-								disabled={exporting}
-								onClick={() => {
-									setOpen(false);
-									void dismissPrompt();
-								}}
-							>
-								{t('export.later')}
-							</button>
-						</>
-					)}
+					<button
+						className="btn btn-primary btn-large"
+						autoFocus
+						onClick={() => {
+							setOpen(false);
+							openFarewell();
+						}}
+					>
+						<Icon name="candle" size={16}/>
+						{t('export.farewell')}
+					</button>
 				</div>
 			</div>
 		</div>
@@ -210,9 +210,9 @@ export function AssistantExportBanner(): JSX.Element | null {
 
 /** The Settings section: an export can always be made again. */
 export function AssistantExportSettings(): JSX.Element {
-	const {state}      = useAssistantExport();
-	const {t}          = useI18n();
-	const exportedDate = useExportedDate();
+	const {state, openFarewell} = useAssistantExport();
+	const {t}                   = useI18n();
+	const exportedDate          = useExportedDate();
 
 	return (
 		<SettingsSection id="settings-assistant-export" title={t('settings.export.title')} description={t('settings.export.desc')}>
@@ -221,6 +221,12 @@ export function AssistantExportSettings(): JSX.Element {
 				<span className="assistant-export-counts">
 					{state?.exportedAt ? t('export.exportedOn', {date: exportedDate}) : t('settings.export.never')}
 				</span>
+				{state?.exportedAt && (
+					<button className="btn btn-ghost" onClick={openFarewell}>
+						<Icon name="candle" size={14}/>
+						{t('farewell.watchAgain')}
+					</button>
+				)}
 			</div>
 			<ExportOutcome/>
 		</SettingsSection>

@@ -5,6 +5,7 @@ import {DebugView} from './components/DebugView';
 import {ConfirmModal} from './components/ConfirmModal';
 import {UpdateModal} from './components/UpdateModal';
 import {AssistantExportBanner, AssistantExportModal, AssistantExportProvider} from './components/AssistantExport';
+import {JorgenFarewell} from './components/farewell/JorgenFarewell';
 import {Icon} from './components/Icon';
 import {useTheme} from './ThemeContext';
 import {type TranslationKey, useI18n} from './i18n';
@@ -408,6 +409,7 @@ function AppWithStreams(props: { theme: string; toggleTheme: () => void; initial
 			/>
 
 			{currentView !== 'debug' && <AssistantExportModal/>}
+			{currentView !== 'debug' && <JorgenFarewell/>}
 
 			<UpdateModal
 				isOpen={showUpdateModal}

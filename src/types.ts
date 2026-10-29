@@ -166,7 +166,6 @@ export type AiQualityProfile = 'balanced' | 'maximum_accuracy';
 export interface AssistantExportState {
 	exportedAt?: string;
 	filePath?: string;
-	promptDismissed?: boolean;
 }
 
 export interface AssistantExportResult {
@@ -252,7 +251,6 @@ declare global {
 			getUserName: () => Promise<string | null>;
 			saveUserName: (userName: string) => Promise<void>;
 			getAssistantExportState: () => Promise<AssistantExportState>;
-			dismissAssistantExportPrompt: () => Promise<AssistantExportState>;
 			exportToAssistant: () => Promise<{ success: boolean; result?: AssistantExportResult; state?: AssistantExportState; error?: string }>;
 			showAssistantExport: () => Promise<void>;
 			openDebugWindow: () => Promise<void>;

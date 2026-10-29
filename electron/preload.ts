@@ -242,9 +242,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
 	getAssistantExportState: () =>
 		ipcRenderer.invoke('get-assistant-export-state'),
 
-	dismissAssistantExportPrompt: () =>
-		ipcRenderer.invoke('dismiss-assistant-export-prompt'),
-
 	exportToAssistant: () =>
 		ipcRenderer.invoke('export-to-assistant'),
 

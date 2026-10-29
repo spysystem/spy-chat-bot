@@ -1054,10 +1054,6 @@ ipcMain.handle('get-assistant-export-state', async () => {
 	return await settingsService.getAssistantExportState();
 });
 
-ipcMain.handle('dismiss-assistant-export-prompt', async () => {
-	return await settingsService.saveAssistantExportState({promptDismissed: true});
-});
-
 ipcMain.handle('export-to-assistant', async () => {
 	try {
 		const result = await writeAssistantExport({
@@ -1065,7 +1061,7 @@ ipcMain.handle('export-to-assistant', async () => {
 			downloadsDir: app.getPath('downloads'),
 			appVersion  : app.getVersion(),
 		});
-		const state  = await settingsService.saveAssistantExportState({exportedAt: result.exportedAt, filePath: result.filePath, promptDismissed: true});
+		const state  = await settingsService.saveAssistantExportState({exportedAt: result.exportedAt, filePath: result.filePath});
 		sendDebugLog('info', 'Assistant export', `Exported ${result.chatCount} chats, ${result.replyContactCount} reply contacts, ${result.attachmentCount} attachments (${result.missingAttachmentCount} missing)`, result.filePath);
 		return {success: true, result, state};
 	} catch (error) {

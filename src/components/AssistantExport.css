@@ -1,4 +1,4 @@
-/* First-start modal: same look as the update modal, but dismissible. */
+/* Start-up modal: same look as the update modal. */
 .assistant-export-overlay {
 	position: fixed;
 	inset: 0;
@@ -32,11 +32,6 @@
 	border-radius: 16px;
 	background: var(--accent-soft);
 	color: var(--accent-color);
-}
-
-.assistant-export-icon.done {
-	background: var(--success-soft);
-	color: var(--success-color);
 }
 
 .assistant-export-modal h2 {
