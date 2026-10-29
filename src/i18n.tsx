@@ -122,6 +122,7 @@ const en = {
 	'settings.nav.sentry'      : 'Sentry',
 	'settings.nav.updates'     : 'Updates',
 	'settings.nav.developer'   : 'Developer',
+	'settings.nav.export'      : 'Admin\'s assistant',
 	'settings.profile.title'   : 'Profile',
 	'settings.profile.desc'    : 'Your name is shown on your messages. Choose the language of the app - Jørgen always answers in the language you write in.',
 	'settings.profile.name'    : 'Your name',
@@ -244,6 +245,26 @@ const en = {
 	'update.later'             : 'Remind me later',
 	'update.install'           : 'Restart and install',
 	'update.installLater'      : 'Install later',
+
+	// Export to Admin's assistant
+	'export.title'             : 'Spørge Jørgen is moving into Admin\'s assistant',
+	'export.text'              : 'Export your chats and reply profiles, then import them there (Settings → Import from Spørge Jørgen).',
+	'export.button'            : 'Export',
+	'export.again'             : 'Export again',
+	'export.later'             : 'Later',
+	'export.exporting'         : 'Exporting…',
+	'export.doneTitle'         : 'Export saved',
+	'export.importThere'       : 'Now import it in Admin\'s assistant: Settings → Import from Spørge Jørgen.',
+	'export.exportedOn'        : 'Exported {date}: import it in Admin\'s assistant (Settings → Import from Spørge Jørgen)',
+	'export.savedIn'           : 'Saved in Downloads:',
+	'export.counts'            : 'Chats: {chats} · reply profiles: {contacts} · attachments: {attachments}',
+	'export.missing'           : 'Attachments not found in Jørgen\'s folder, left out: {count}',
+	'export.showFile'          : 'Show in folder',
+	'export.failed'            : 'The export failed: {error}',
+	'export.close'             : 'Close',
+	'settings.export.title'    : 'Export to Admin\'s assistant',
+	'settings.export.desc'     : 'Spørge Jørgen is moving into Admin\'s assistant. The export is one file in Downloads with your chats, their attachments and your reply profiles - nothing else: no settings, keys, logins or query log. Import it in Admin\'s assistant under Settings → Import from Spørge Jørgen. You can export again at any time; importing again adds new chats and updates changed ones.',
+	'settings.export.never'    : 'Not exported yet',
 } as const;
 
 export type TranslationKey = keyof typeof en;
@@ -360,6 +381,7 @@ const da: Record<TranslationKey, string> = {
 	'settings.nav.sentry'      : 'Sentry',
 	'settings.nav.updates'     : 'Opdateringer',
 	'settings.nav.developer'   : 'Udvikler',
+	'settings.nav.export'      : 'Admins assistent',
 	'settings.profile.title'   : 'Profil',
 	'settings.profile.desc'    : 'Dit navn vises på dine beskeder. Vælg sproget i appen - Jørgen svarer altid på det sprog, du skriver på.',
 	'settings.profile.name'    : 'Dit navn',
@@ -481,6 +503,26 @@ const da: Record<TranslationKey, string> = {
 	'update.later'             : 'Påmind mig senere',
 	'update.install'           : 'Genstart og installér',
 	'update.installLater'      : 'Installér senere',
+
+	// Export to Admin's assistant
+	'export.title'             : 'Spørge Jørgen flytter ind i Admins assistent',
+	'export.text'              : 'Eksportér dine chats og svarprofiler, og importér dem derefter dér (Indstillinger → Importér fra Spørge Jørgen).',
+	'export.button'            : 'Eksportér',
+	'export.again'             : 'Eksportér igen',
+	'export.later'             : 'Senere',
+	'export.exporting'         : 'Eksporterer…',
+	'export.doneTitle'         : 'Eksporten er gemt',
+	'export.importThere'       : 'Importér den nu i Admins assistent: Indstillinger → Importér fra Spørge Jørgen.',
+	'export.exportedOn'        : 'Eksporteret {date}: importér den i Admins assistent (Indstillinger → Importér fra Spørge Jørgen)',
+	'export.savedIn'           : 'Gemt i Overførsler:',
+	'export.counts'            : 'Chats: {chats} · svarprofiler: {contacts} · vedhæftninger: {attachments}',
+	'export.missing'           : 'Vedhæftninger der ikke blev fundet i Jørgens mappe og ikke kom med: {count}',
+	'export.showFile'          : 'Vis i mappe',
+	'export.failed'            : 'Eksporten fejlede: {error}',
+	'export.close'             : 'Luk',
+	'settings.export.title'    : 'Eksportér til Admins assistent',
+	'settings.export.desc'     : 'Spørge Jørgen flytter ind i Admins assistent. Eksporten er én fil i Overførsler med dine chats, deres vedhæftninger og dine svarprofiler - intet andet: ingen indstillinger, nøgler, logins eller forespørgselslog. Importér den i Admins assistent under Indstillinger → Importér fra Spørge Jørgen. Du kan eksportere igen når som helst; en ny import tilføjer nye chats og opdaterer ændrede.',
+	'settings.export.never'    : 'Ikke eksporteret endnu',
 };
 
 const DICTIONARIES: Record<Language, Record<TranslationKey, string>> = {en, da};

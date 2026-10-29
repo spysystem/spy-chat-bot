@@ -1,7 +1,9 @@
 import {app, BrowserWindow, ipcMain, Menu, shell} from 'electron';
 import {autoUpdater} from 'electron-updater';
+import * as fs from 'fs';
 import * as path from 'path';
 import {AttachmentService} from './services/attachment-service';
+import {writeAssistantExport} from './services/assistant-export';
 import type {ChatMessage, ChatUpdate} from './services/chat-service';
 import {ChatService} from './services/chat-service';
 import {ClaudeService, type ReplyLanguage} from './services/claude-service';
@@ -1045,6 +1047,41 @@ ipcMain.handle('get-user-name', async () => {
 
 ipcMain.handle('save-user-name', async (_event, userName: string) => {
 	return await settingsService.saveUserName(userName);
+});
+
+// Export to Admin's assistant
+ipcMain.handle('get-assistant-export-state', async () => {
+	return await settingsService.getAssistantExportState();
+});
+
+ipcMain.handle('dismiss-assistant-export-prompt', async () => {
+	return await settingsService.saveAssistantExportState({promptDismissed: true});
+});
+
+ipcMain.handle('export-to-assistant', async () => {
+	try {
+		const result = await writeAssistantExport({
+			userDataDir : app.getPath('userData'),
+			downloadsDir: app.getPath('downloads'),
+			appVersion  : app.getVersion(),
+		});
+		const state  = await settingsService.saveAssistantExportState({exportedAt: result.exportedAt, filePath: result.filePath, promptDismissed: true});
+		sendDebugLog('info', 'Assistant export', `Exported ${result.chatCount} chats, ${result.replyContactCount} reply contacts, ${result.attachmentCount} attachments (${result.missingAttachmentCount} missing)`, result.filePath);
+		return {success: true, result, state};
+	} catch (error) {
+		sendDebugLog('error', 'Assistant export', 'Export failed', error instanceof Error ? error.stack : String(error));
+		return {success: false, error: error instanceof Error ? error.message : String(error)};
+	}
+});
+
+// Shows the last export in its folder; only the path the export wrote is ever opened.
+ipcMain.handle('show-assistant-export', async () => {
+	const {filePath} = await settingsService.getAssistantExportState();
+	if (filePath && fs.existsSync(filePath)) {
+		shell.showItemInFolder(filePath);
+		return;
+	}
+	await shell.openPath(app.getPath('downloads'));
 });
 
 // Debug window

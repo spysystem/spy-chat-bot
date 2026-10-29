@@ -238,6 +238,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
 	saveUserName: (userName: string) =>
 		ipcRenderer.invoke('save-user-name', userName),
 
+	// Export to Admin's assistant
+	getAssistantExportState: () =>
+		ipcRenderer.invoke('get-assistant-export-state'),
+
+	dismissAssistantExportPrompt: () =>
+		ipcRenderer.invoke('dismiss-assistant-export-prompt'),
+
+	exportToAssistant: () =>
+		ipcRenderer.invoke('export-to-assistant'),
+
+	showAssistantExport: () =>
+		ipcRenderer.invoke('show-assistant-export'),
+
 	// Window focus
 	focusWindow: () =>
 		ipcRenderer.invoke('focus-window'),

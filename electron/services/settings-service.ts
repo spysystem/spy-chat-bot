@@ -4,10 +4,18 @@ import * as path from 'path';
 
 export type AiQualityProfile = 'balanced' | 'maximum_accuracy';
 
+/** The last export to Admin's assistant, and whether its first-start modal was answered. */
+export interface AssistantExportState {
+	exportedAt?: string;
+	filePath?: string;
+	promptDismissed?: boolean;
+}
+
 export interface UserSettings {
 	userName?: string;
 	localRepoUrl?: string;
 	aiQualityProfile?: AiQualityProfile;
+	assistantExport?: AssistantExportState;
 }
 
 export class SettingsService {
@@ -75,6 +83,18 @@ export class SettingsService {
 		const settings           = await this.getSettings();
 		settings.aiQualityProfile = profile;
 		await this.saveSettings(settings);
+	}
+
+	async getAssistantExportState(): Promise<AssistantExportState> {
+		const settings = await this.getSettings();
+		return settings.assistantExport ?? {};
+	}
+
+	async saveAssistantExportState(change: AssistantExportState): Promise<AssistantExportState> {
+		const settings          = await this.getSettings();
+		settings.assistantExport = {...settings.assistantExport, ...change};
+		await this.saveSettings(settings);
+		return settings.assistantExport;
 	}
 
 }
