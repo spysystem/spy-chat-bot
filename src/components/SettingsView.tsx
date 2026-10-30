@@ -10,6 +10,7 @@ import type {
 } from '../types';
 import './SettingsView.css';
 import {SentrySettings} from './SentrySettings';
+import {AssistantExportSettings} from './AssistantExport';
 import {SettingsSection, StatusText} from './SettingsSection';
 import {Icon, type IconName} from './Icon';
 import {LANGUAGES, type TranslationKey, useI18n} from '../i18n';
@@ -426,6 +427,8 @@ export function SettingsView(): JSX.Element {
 					<h1>{t('settings.title')}</h1>
 					<p>{t('settings.intro')}</p>
 				</header>
+
+				<AssistantExportSettings/>
 
 				<SettingsSection id="settings-profile" title={t('settings.profile.title')} description={t('settings.profile.desc')}>
 					<div className="form-group">
@@ -971,6 +974,7 @@ export function SettingsView(): JSX.Element {
 }
 
 const SETTINGS_NAV: Array<{ id: string; label: TranslationKey; icon: IconName }> = [
+	{id: 'settings-assistant-export', label: 'settings.nav.export', icon: 'download'},
 	{id: 'settings-profile', label: 'settings.nav.profile', icon: 'message'},
 	{id: 'settings-ai', label: 'settings.nav.ai', icon: 'settings'},
 	{id: 'settings-database', label: 'settings.nav.database', icon: 'database'},

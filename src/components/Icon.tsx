@@ -30,6 +30,7 @@ const PATHS = {
 	mail         : <><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></>,
 	package      : <><path d="M16.5 9.4 7.5 4.21M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="M3.27 6.96 12 12.01l8.73-5.05M12 22.08V12"/></>,
 	chart        : <path d="M3 3v18h18M18 17V9M13 17V5M8 17v-3"/>,
+	candle       : <><path d="M12 2.5c1.6 1.9 2.2 3.1 2.2 4.1a2.2 2.2 0 0 1-4.4 0c0-1 .6-2.2 2.2-4.1z"/><rect x="8.5" y="11" width="7" height="10.5" rx="1"/></>,
 } as const;
 
 export type IconName = keyof typeof PATHS;

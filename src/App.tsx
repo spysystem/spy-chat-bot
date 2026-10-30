@@ -4,6 +4,8 @@ import {SettingsView} from './components/SettingsView';
 import {DebugView} from './components/DebugView';
 import {ConfirmModal} from './components/ConfirmModal';
 import {UpdateModal} from './components/UpdateModal';
+import {AssistantExportBanner, AssistantExportModal, AssistantExportProvider} from './components/AssistantExport';
+import {JorgenFarewell} from './components/farewell/JorgenFarewell';
 import {Icon} from './components/Icon';
 import {useTheme} from './ThemeContext';
 import {type TranslationKey, useI18n} from './i18n';
@@ -60,7 +62,9 @@ export function App(): JSX.Element {
 
 	return (
 		<AiStreamProvider>
-			<AppWithStreams theme={theme} toggleTheme={toggleTheme} initialView={initialView}/>
+			<AssistantExportProvider>
+				<AppWithStreams theme={theme} toggleTheme={toggleTheme} initialView={initialView}/>
+			</AssistantExportProvider>
 		</AiStreamProvider>
 	);
 }
@@ -294,6 +298,8 @@ function AppWithStreams(props: { theme: string; toggleTheme: () => void; initial
 						)}
 					</div>
 
+					<AssistantExportBanner/>
+
 					<div className="chat-list">
 						{chatGroups.map((group) => (
 							<div key={group.label} className="chat-group">
@@ -401,6 +407,9 @@ function AppWithStreams(props: { theme: string; toggleTheme: () => void; initial
 				onCancel={closeClearAllModal}
 				confirmText={t('app.clearConfirm')}
 			/>
+
+			{currentView !== 'debug' && <AssistantExportModal/>}
+			{currentView !== 'debug' && <JorgenFarewell/>}
 
 			<UpdateModal
 				isOpen={showUpdateModal}

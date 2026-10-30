@@ -163,6 +163,20 @@ export interface DebugLogEntry {
 
 export type AiQualityProfile = 'balanced' | 'maximum_accuracy';
 
+export interface AssistantExportState {
+	exportedAt?: string;
+	filePath?: string;
+}
+
+export interface AssistantExportResult {
+	filePath: string;
+	exportedAt: string;
+	chatCount: number;
+	replyContactCount: number;
+	attachmentCount: number;
+	missingAttachmentCount: number;
+}
+
 declare global {
 	interface Window {
 		electronAPI: {
@@ -236,6 +250,9 @@ declare global {
 			onLocalRepoSyncProgress: (callback: (progress: LocalRepoSyncProgress) => void) => () => void;
 			getUserName: () => Promise<string | null>;
 			saveUserName: (userName: string) => Promise<void>;
+			getAssistantExportState: () => Promise<AssistantExportState>;
+			exportToAssistant: () => Promise<{ success: boolean; result?: AssistantExportResult; state?: AssistantExportState; error?: string }>;
+			showAssistantExport: () => Promise<void>;
 			openDebugWindow: () => Promise<void>;
 			focusWindow: () => Promise<void>;
 			openExternalUrl: (url: string) => Promise<{ success: boolean; error?: string }>;
